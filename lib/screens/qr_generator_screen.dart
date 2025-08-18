@@ -34,13 +34,6 @@ class _QRGeneratorScreenState extends State<QRGeneratorScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Generate QR Code'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _generateQRCode,
-            tooltip: 'Generate new QR code',
-          ),
-        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(24),

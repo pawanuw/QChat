@@ -5,6 +5,7 @@ import '../utils/app_theme.dart';
 import 'qr_generator_screen.dart';
 import 'qr_scanner_screen.dart';
 import 'chat_screen.dart';
+import 'unread_notifications_screen.dart';
 import '../models/chat_session.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -16,9 +17,58 @@ class HomeScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('QChat'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.info_outline),
-            onPressed: () => _showInfoDialog(context),
+          // Notifications button with unread badge
+          Consumer<ChatProvider>(
+            builder: (context, chatProvider, _) {
+              final unreadCount = chatProvider.unreadCount;
+              return Stack(
+                alignment: Alignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.notifications_outlined),
+                    tooltip: 'Unread messages',
+                    onPressed: () async {
+                      // Navigate to unread notifications list
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const UnreadNotificationsScreen(),
+                        ),
+                      );
+                      // After returning, clear unread notifications
+                      if (context.mounted) {
+                        context.read<ChatProvider>().markAllAsRead();
+                      }
+                    },
+                  ),
+                  if (unreadCount > 0)
+                    Positioned(
+                      right: 10,
+                      top: 10,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.redAccent,
+                          borderRadius: BorderRadius.circular(10),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.2),
+                              blurRadius: 4,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        constraints: const BoxConstraints(minWidth: 18, minHeight: 16),
+                        child: Text(
+                          unreadCount > 99 ? '99+' : '$unreadCount',
+                          style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
           ),
         ],
       ),
@@ -168,23 +218,14 @@ class HomeScreen extends StatelessWidget {
             color: Colors.white,
           ),
         ),
-        title: Text(session.peerName),
-        subtitle: Text(
-          session.isActive ? 'Active' : 'Ended',
-          style: TextStyle(
-            color: session.isActive ? AppTheme.secondaryColor : AppTheme.subtitleColor,
-            fontWeight: FontWeight.w500,
-          ),
+        title: Align(
+          alignment: Alignment.centerLeft,
+          child: Text(session.peerName),
         ),
+        // Remove subtitle and status dot for a cleaner list per request
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (session.isActive)
-              const Icon(
-                Icons.circle,
-                color: AppTheme.secondaryColor,
-                size: 12,
-              ),
             const SizedBox(width: 8),
             PopupMenuButton<String>(
               onSelected: (value) async {
@@ -226,32 +267,5 @@ class HomeScreen extends StatelessWidget {
       ),
     );
   }
-
-  void _showInfoDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('How to use QChat'),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('1. Generate QR Code: Create a QR code to share with others'),
-            SizedBox(height: 8),
-            Text('2. Scan QR Code: Scan someone else\'s QR code to connect'),
-            SizedBox(height: 8),
-            Text('3. Chat: Start messaging instantly after connection'),
-            SizedBox(height: 8),
-            Text('4. Your chat history syncs in the cloud for this device id'),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Got it'),
-          ),
-        ],
-      ),
-    );
-  }
+  // Info dialog removed per request
 }

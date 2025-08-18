@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -35,6 +36,17 @@ class ChatProvider extends ChangeNotifier {
   String? _lastError;
   String? get lastError => _lastError;
 
+  // Unread notifications (in-memory)
+  final List<Message> _unreadMessages = [];
+  List<Message> get unreadMessages => List.unmodifiable(_unreadMessages);
+  int get unreadCount => _unreadMessages.length;
+
+  // Track last seen timestamp per chat (milliseconds since epoch)
+  final Map<String, int> _lastSeenMsPerChat = {};
+
+  // Message listeners per chat for unread tracking
+  final Map<String, StreamSubscription> _messageSubscriptions = {};
+
   ChatProvider() {
     _init();
   }
@@ -67,6 +79,10 @@ class ChatProvider extends ChangeNotifier {
   Future<void> _loadChatSessions() async {
     try {
       _chatSessions = List.from(_webSessions);
+      // Ensure unread listeners for existing sessions
+      for (final s in _chatSessions) {
+        _ensureChatListener(s.id);
+      }
       notifyListeners();
     } catch (e) {
       debugPrint('Error loading chat sessions: $e');
@@ -147,6 +163,9 @@ class ChatProvider extends ChangeNotifier {
         _lastError = 'Failed to create chat doc: $e';
         debugPrint(_lastError);
       }
+
+  // Start unread tracking for this chat
+  _ensureChatListener(sessionId);
       
       notifyListeners();
     } catch (e) {
@@ -168,6 +187,10 @@ class ChatProvider extends ChangeNotifier {
   // Set current session (for compatibility)
   Future<void> setCurrentSession(ChatSession session) async {
     await loadMessages(session.id);
+  // Mark as read when opening the chat
+  markChatAsRead(session.id);
+  // Ensure listener exists for unread tracking
+  _ensureChatListener(session.id);
   }
 
   // Send a message to Firestore
@@ -240,6 +263,11 @@ class ChatProvider extends ChangeNotifier {
       }
       
       _chatSessions = List.from(_webSessions);
+
+  // Clean up unread tracking for this chat
+  _messageSubscriptions.remove(sessionId)?.cancel();
+  _lastSeenMsPerChat.remove(sessionId);
+  _unreadMessages.removeWhere((m) => m.chatSessionId == sessionId);
       notifyListeners();
     } catch (e) {
       debugPrint('Error deleting session: $e');
@@ -265,5 +293,101 @@ class ChatProvider extends ChangeNotifier {
   String _composeChatId(String a, String b) {
     final sorted = [a, b]..sort();
     return '${sorted[0]}_${sorted[1]}';
+  }
+
+  // Internal: setup a listener on latest messages for unread tracking
+  void _ensureChatListener(String chatId) {
+    if (_messageSubscriptions.containsKey(chatId)) return;
+    final sub = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(chatId)
+        .collection('messages')
+        .orderBy('timestampMs', descending: true)
+        .limit(1)
+        .snapshots()
+        .listen((snapshot) {
+      if (snapshot.docs.isEmpty) return;
+      final doc = snapshot.docs.first;
+      final data = doc.data();
+      final senderId = (data['senderId'] ?? '').toString();
+      final text = (data['text'] ?? '').toString();
+      final tsMs = (data['timestampMs'] ?? 0);
+      final timestampMs = tsMs is int ? tsMs : (tsMs is num ? tsMs.toInt() : 0);
+      final lastSeen = _lastSeenMsPerChat[chatId] ?? 0;
+
+      // On first event after subscribing (no lastSeen), seed and ignore to prevent backfill
+      if (lastSeen == 0) {
+        _lastSeenMsPerChat[chatId] = timestampMs > 0
+            ? timestampMs
+            : DateTime.now().millisecondsSinceEpoch;
+        return;
+      }
+
+      // Ignore if from me or not newer than last seen
+      if (senderId == _userId || timestampMs <= lastSeen) return;
+
+      // If currently viewing this chat, mark as seen immediately
+      if (_currentSession?.id == chatId) {
+        _lastSeenMsPerChat[chatId] = DateTime.now().millisecondsSinceEpoch;
+        return;
+      }
+
+      // Add to unread if not already present
+      final timeField = data['timestamp'];
+      DateTime time;
+      if (timeField is Timestamp) {
+        time = timeField.toDate();
+      } else if (timeField is DateTime) {
+        time = timeField;
+      } else if (timestampMs > 0) {
+        time = DateTime.fromMillisecondsSinceEpoch(timestampMs);
+      } else {
+        time = DateTime.now();
+      }
+      final message = Message(
+        content: text,
+        senderId: senderId,
+        chatSessionId: chatId,
+        timestamp: time,
+        isFromMe: false,
+      );
+
+      // Deduplicate by same chatId + text + timestampMs
+      final already = _unreadMessages.any((m) =>
+          m.chatSessionId == chatId &&
+          m.content == message.content &&
+          m.timestamp.millisecondsSinceEpoch == message.timestamp.millisecondsSinceEpoch);
+      if (!already) {
+        _unreadMessages.add(message);
+        notifyListeners();
+      }
+    });
+    _messageSubscriptions[chatId] = sub;
+  }
+
+  // Public API: mark all as read
+  void markAllAsRead() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final s in _webSessions) {
+      _lastSeenMsPerChat[s.id] = now;
+    }
+    _unreadMessages.clear();
+    notifyListeners();
+  }
+
+  // Public API: mark a chat as read
+  void markChatAsRead(String chatId) {
+    _lastSeenMsPerChat[chatId] = DateTime.now().millisecondsSinceEpoch;
+    _unreadMessages.removeWhere((m) => m.chatSessionId == chatId);
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    for (final sub in _messageSubscriptions.values) {
+      sub.cancel();
+    }
+    _messageSubscriptions.clear();
+    super.dispose();
   }
 }
