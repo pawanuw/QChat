@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../providers/chat_provider_web.dart';
 import '../models/message.dart';
 import '../utils/app_theme.dart';
+import '../utils/user_id.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -115,17 +117,49 @@ class _ChatScreenState extends State<ChatScreen> {
 
               // Messages list
               Expanded(
-                child: chatProvider.messages.isEmpty
-                    ? _buildEmptyMessagesView()
-                    : ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.all(16),
-                        itemCount: chatProvider.messages.length,
-                        itemBuilder: (context, index) {
-                          final message = chatProvider.messages[index];
-                          return _buildMessageBubble(message);
-                        },
-                      ),
+                child: StreamBuilder<QuerySnapshot>(
+                  stream: chatProvider.getMessages(session.id),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                      return _buildEmptyMessagesView();
+                    }
+
+                    final docs = snapshot.data!.docs;
+                    return ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.all(16),
+                      itemCount: docs.length,
+                      itemBuilder: (context, index) {
+                        final doc = docs[index];
+                        final data = doc.data() as Map<String, dynamic>;
+                        final senderId = (data['senderId'] ?? '').toString();
+                        final text = (data['text'] ?? '').toString();
+                        final ts = data['timestamp'];
+                        DateTime time;
+                        if (ts is Timestamp) {
+                          time = ts.toDate();
+                        } else if (ts is DateTime) {
+                          time = ts;
+                        } else {
+                          time = DateTime.now();
+                        }
+
+                        final isFromMe = senderId == chatProvider.userId;
+                        final message = Message(
+                          content: text,
+                          senderId: senderId,
+                          chatSessionId: session.id,
+                          timestamp: time,
+                          isFromMe: isFromMe,
+                        );
+                        return _buildMessageBubble(message);
+                      },
+                    );
+                  },
+                ),
               ),
 
               // Message input
@@ -275,16 +309,19 @@ class _ChatScreenState extends State<ChatScreen> {
     // Clear input immediately for better UX
     _messageController.clear();
 
-    // Send message
-    await chatProvider.sendMessage(text);
+    // Send message using Firestore
+    final session = chatProvider.currentSession;
+    if (session == null) return;
+    final userId = await UserIdHelper.getUserId();
+    await chatProvider.sendMessage(session.id, text, userId);
 
     // Scroll to bottom to show new message
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollToBottom();
     });
 
-    // Show feedback if not connected
-    if (!chatProvider.isConnected && mounted) {
+  // Optional feedback if not connected (kept for UX)
+  if (!chatProvider.isConnected && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Message queued - will send when connected'),

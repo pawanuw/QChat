@@ -242,7 +242,7 @@ class HomeScreen extends StatelessWidget {
             SizedBox(height: 8),
             Text('3. Chat: Start messaging instantly after connection'),
             SizedBox(height: 8),
-            Text('4. All chats are stored locally on your device'),
+            Text('4. Your chat history syncs in the cloud for this device id'),
           ],
         ),
         actions: [

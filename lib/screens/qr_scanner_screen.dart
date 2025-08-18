@@ -290,7 +290,7 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
       isProcessing = true;
     });
 
-    try {
+  try {
       final chatProvider = context.read<ChatProvider>();
       final success = await chatProvider.connectToSession(qrCode);
 

@@ -1,9 +1,10 @@
 import 'dart:convert';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/message.dart';
 import '../models/chat_session.dart';
+import '../utils/user_id.dart';
 
 class ChatProvider extends ChangeNotifier {
   // User ID for this device
@@ -14,7 +15,7 @@ class ChatProvider extends ChangeNotifier {
   ChatSession? _currentSession;
   ChatSession? get currentSession => _currentSession;
 
-  // Messages for current session
+  // Messages for current session (legacy local list, not used with Firestore stream)
   List<Message> _messages = [];
   List<Message> get messages => _messages;
 
@@ -22,8 +23,7 @@ class ChatProvider extends ChangeNotifier {
   List<ChatSession> _chatSessions = [];
   List<ChatSession> get chatSessions => _chatSessions;
 
-  // Web-compatible in-memory storage
-  final Map<String, List<Message>> _webMessages = {};
+  // Local in-memory chat sessions list for UI
   final List<ChatSession> _webSessions = [];
 
   // Connection status
@@ -31,13 +31,16 @@ class ChatProvider extends ChangeNotifier {
   bool get isConnected => _isConnected;
 
   ChatProvider() {
-    _generateUserId();
-    _loadChatSessions();
+    _init();
   }
 
-  void _generateUserId() {
-    // Generate a unique user ID for this device
-    _userId = 'user_${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(1000)}';
+  Future<void> _init() async {
+    // Load or generate persistent anonymous user id
+    _userId = await UserIdHelper.getUserId();
+    await _loadChatSessions();
+    // Consider as connected when a session is active
+    _isConnected = _currentSession != null;
+    notifyListeners();
   }
 
   // Load all chat sessions
@@ -50,34 +53,30 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  // Generate QR code data for pairing
+  // Generate QR code data for pairing: share only our userId
   String generateQRCode() {
-    return jsonEncode({
-      'userId': _userId,
-      'action': 'pair',
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-    });
+    return _userId;
   }
 
   // Generate QR code data (alias for compatibility)
-  String generateQRData() {
-    return generateQRCode();
-  }
+  String generateQRData() => generateQRCode();
 
   // Process scanned QR code
   Future<bool> processQRCode(String qrData) async {
     try {
-      final data = jsonDecode(qrData) as Map<String, dynamic>;
-      
-      if (data['action'] == 'pair') {
-        final partnerId = data['userId'] as String;
-        
-        if (partnerId != _userId) {
-          await startChatSession(partnerId);
-          return true;
-        }
+      // Accept either raw userId or JSON with userId
+      String partnerId;
+      try {
+        final data = jsonDecode(qrData) as Map<String, dynamic>;
+        partnerId = (data['userId'] ?? '').toString();
+      } catch (_) {
+        partnerId = qrData;
       }
-      return false;
+
+      if (partnerId.isEmpty || partnerId == _userId) return false;
+
+      await startChatSession(partnerId);
+      return true;
     } catch (e) {
       debugPrint('Error processing QR code: $e');
       return false;
@@ -92,19 +91,22 @@ class ChatProvider extends ChangeNotifier {
   // Start a new chat session
   Future<void> startChatSession(String partnerId) async {
     try {
-      final sessionId = 'chat_${_userId}_${partnerId}_${DateTime.now().millisecondsSinceEpoch}';
+      final sessionId = _composeChatId(_userId, partnerId);
       
       final session = ChatSession(
         id: sessionId,
         peerId: partnerId,
-        peerName: 'User ${partnerId.substring(partnerId.length - 4)}',
+        peerName: partnerId.length >= 4
+            ? 'User ${partnerId.substring(partnerId.length - 4)}'
+            : 'User $partnerId',
         createdAt: DateTime.now(),
         isActive: true,
       );
 
       // Save to in-memory storage
-      _webSessions.add(session);
-      _webMessages[sessionId] = [];
+      if (_webSessions.indexWhere((s) => s.id == sessionId) == -1) {
+        _webSessions.add(session);
+      }
       
       _currentSession = session;
       _messages = [];
@@ -122,7 +124,6 @@ class ChatProvider extends ChangeNotifier {
   Future<void> loadMessages(String sessionId) async {
     try {
       _currentSession = _chatSessions.firstWhere((s) => s.id == sessionId);
-      _messages = List.from(_webMessages[sessionId] ?? []);
       _isConnected = true;
       notifyListeners();
     } catch (e) {
@@ -135,57 +136,31 @@ class ChatProvider extends ChangeNotifier {
     await loadMessages(session.id);
   }
 
-  // Send a message
-  Future<void> sendMessage(String content) async {
-    if (_currentSession == null) return;
+  // Send a message to Firestore
+  Future<void> sendMessage(String chatId, String text, String senderId) async {
+    final messagesRef = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(chatId)
+        .collection('messages');
 
-    try {
-      final message = Message(
-        content: content,
-        senderId: _userId,
-        chatSessionId: _currentSession!.id,
-        timestamp: DateTime.now(),
-        isFromMe: true,
-      );
-
-      // Save to in-memory storage
-      if (_webMessages[_currentSession!.id] == null) {
-        _webMessages[_currentSession!.id] = [];
-      }
-      _webMessages[_currentSession!.id]!.add(message);
-      
-      _messages.add(message);
-      
-      // Simulate echo message for demo purposes
-      _simulateEchoMessage(content);
-      
-      notifyListeners();
-    } catch (e) {
-      debugPrint('Error sending message: $e');
-    }
-  }
-
-  // Simulate an echo response for demo
-  void _simulateEchoMessage(String originalContent) {
-    if (_currentSession == null) return;
-
-    Future.delayed(const Duration(seconds: 1), () {
-      final echoMessage = Message(
-        content: 'Echo: $originalContent',
-        senderId: _currentSession!.peerId,
-        chatSessionId: _currentSession!.id,
-        timestamp: DateTime.now(),
-        isFromMe: false,
-      );
-
-      if (_webMessages[_currentSession!.id] != null) {
-        _webMessages[_currentSession!.id]!.add(echoMessage);
-        _messages.add(echoMessage);
-        
-        notifyListeners();
-      }
+    await messagesRef.add({
+      'senderId': senderId,
+      'text': text,
+      'timestamp': FieldValue.serverTimestamp(),
     });
   }
+
+  // Stream messages from Firestore
+  Stream<QuerySnapshot> getMessages(String chatId) {
+    return FirebaseFirestore.instance
+        .collection('chats')
+        .doc(chatId)
+        .collection('messages')
+        .orderBy('timestamp', descending: false)
+        .snapshots();
+  }
+
+  // No echo simulation when using Firestore
 
   // Disconnect from current session
   void disconnect() {
@@ -209,7 +184,6 @@ class ChatProvider extends ChangeNotifier {
   Future<void> deleteSession(String sessionId) async {
     try {
       _webSessions.removeWhere((s) => s.id == sessionId);
-      _webMessages.remove(sessionId);
       
       if (_currentSession?.id == sessionId) {
         _currentSession = null;
@@ -232,11 +206,16 @@ class ChatProvider extends ChangeNotifier {
   // Clear all data
   void clearAllData() {
     _webSessions.clear();
-    _webMessages.clear();
     _chatSessions.clear();
     _messages.clear();
     _currentSession = null;
     _isConnected = false;
     notifyListeners();
+  }
+
+  // Compose a deterministic chat id for two users
+  String _composeChatId(String a, String b) {
+    final sorted = [a, b]..sort();
+    return '${sorted[0]}_${sorted[1]}';
   }
 }

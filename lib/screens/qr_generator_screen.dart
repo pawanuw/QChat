@@ -3,7 +3,6 @@ import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../providers/chat_provider_web.dart';
 import '../utils/app_theme.dart';
-import 'chat_screen.dart';
 
 class QRGeneratorScreen extends StatefulWidget {
   const QRGeneratorScreen({super.key});
@@ -28,52 +27,6 @@ class _QRGeneratorScreenState extends State<QRGeneratorScreen> {
       qrData = chatProvider.generateQRData();
       isWaitingForConnection = true;
     });
-
-    // Start checking for connections (simulated)
-    _checkForConnection();
-  }
-
-  void _checkForConnection() {
-    // In a real app, you would listen for incoming connections
-    // For demo purposes, we'll simulate a connection after 10 seconds
-    Future.delayed(const Duration(seconds: 10), () {
-      if (mounted && isWaitingForConnection) {
-        _simulateIncomingConnection();
-      }
-    });
-  }
-
-  void _simulateIncomingConnection() async {
-    if (!mounted) return;
-
-    // Simulate someone scanning our QR code
-    final chatProvider = context.read<ChatProvider>();
-    final success = await chatProvider.connectToSession(qrData);
-
-    if (success && mounted) {
-      setState(() {
-        isWaitingForConnection = false;
-      });
-
-      // Show success message
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Someone connected! Starting chat...'),
-          backgroundColor: AppTheme.secondaryColor,
-        ),
-      );
-
-      // Navigate to chat screen
-      await Future.delayed(const Duration(seconds: 1));
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const ChatScreen(),
-          ),
-        );
-      }
-    }
   }
 
   @override
@@ -92,42 +45,51 @@ class _QRGeneratorScreenState extends State<QRGeneratorScreen> {
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: SingleChildScrollView(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
+          child: Center(
+            // Keep content nicely centered on wide screens while filling on mobile
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 600),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
             // QR Code display
-            Card(
-              elevation: 8,
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  children: [
-                    if (qrData.isNotEmpty)
-                      QrImageView(
-                        data: qrData,
-                        version: QrVersions.auto,
-                        size: 250.0,
-                        backgroundColor: Colors.white,
-                        foregroundColor: AppTheme.primaryColor,
-                      )
-                    else
-                      Container(
-                        width: 250,
-                        height: 250,
-                        decoration: BoxDecoration(
-                          color: AppTheme.backgroundColor,
-                          borderRadius: BorderRadius.circular(12),
+            SizedBox(
+              width: double.infinity,
+              child: Card(
+                elevation: 8,
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (qrData.isNotEmpty)
+                        QrImageView(
+                          data: qrData,
+                          version: QrVersions.auto,
+                          size: 250.0,
+                          backgroundColor: Colors.white,
+                          foregroundColor: AppTheme.primaryColor,
+                        )
+                      else
+                        Container(
+                          width: 250,
+                          height: 250,
+                          decoration: BoxDecoration(
+                            color: AppTheme.backgroundColor,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Center(
+                            child: CircularProgressIndicator(),
+                          ),
                         ),
-                        child: const Center(
-                          child: CircularProgressIndicator(),
-                        ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'QR Code for Chat',
+                        style: Theme.of(context).textTheme.headlineMedium,
                       ),
-                    const SizedBox(height: 16),
-                    Text(
-                      'QR Code for Chat',
-                      style: Theme.of(context).textTheme.headlineMedium,
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -168,69 +130,20 @@ class _QRGeneratorScreenState extends State<QRGeneratorScreen> {
 
             const SizedBox(height: 24),
 
-            // Connection status
-            if (isWaitingForConnection)
-              Column(
-                children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Waiting for someone to scan...',
-                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      color: AppTheme.primaryColor,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Keep this screen open',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ],
-              )
-            else
-              Column(
-                children: [
-                  const Icon(
-                    Icons.check_circle,
-                    color: AppTheme.secondaryColor,
-                    size: 48,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Connected!',
-                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      color: AppTheme.secondaryColor,
-                    ),
-                  ),
-                ],
-              ),
+            // Simple hint
+            Text(
+              'Share this QR. The other device scans to start a chat.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
 
             const SizedBox(height: 24),
-          ],
-        ),
-      ),
-      ),
-      bottomNavigationBar: SafeArea(
-        minimum: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-        child: Row(
-          children: [
-            Expanded(
-              child: OutlinedButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Back'),
+                ],
               ),
             ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: ElevatedButton(
-                onPressed: _generateQRCode,
-                child: const Text('New QR Code'),
-              ),
-            ),
-          ],
+          ),
         ),
-      ),
+  ),
     );
   }
 }
