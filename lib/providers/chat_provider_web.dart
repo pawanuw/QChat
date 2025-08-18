@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../models/message.dart';
 import '../models/chat_session.dart';
 import '../utils/user_id.dart';
@@ -30,6 +31,10 @@ class ChatProvider extends ChangeNotifier {
   bool _isConnected = false;
   bool get isConnected => _isConnected;
 
+  // Last error message for diagnostics (read-only)
+  String? _lastError;
+  String? get lastError => _lastError;
+
   ChatProvider() {
     _init();
   }
@@ -37,10 +42,25 @@ class ChatProvider extends ChangeNotifier {
   Future<void> _init() async {
     // Load or generate persistent anonymous user id
     _userId = await UserIdHelper.getUserId();
+    // Ensure we're authenticated for Firestore rules
+    await _ensureAuth();
     await _loadChatSessions();
     // Consider as connected when a session is active
     _isConnected = _currentSession != null;
     notifyListeners();
+  }
+
+  Future<void> _ensureAuth() async {
+    try {
+      if (FirebaseAuth.instance.currentUser == null) {
+        await FirebaseAuth.instance.signInAnonymously();
+      }
+    } catch (e) {
+      // Capture error so UI can surface it
+      _lastError = 'Auth error: $e';
+      debugPrint(_lastError);
+      notifyListeners();
+    }
   }
 
   // Load all chat sessions
@@ -113,6 +133,20 @@ class ChatProvider extends ChangeNotifier {
       
       _chatSessions = List.from(_webSessions);
       _isConnected = true;
+
+      // Ensure a chat document exists in Firestore so the peer can discover it
+      try {
+        final chatDoc = FirebaseFirestore.instance.collection('chats').doc(sessionId);
+        await chatDoc.set({
+          'participants': [_userId, partnerId],
+          'createdAt': FieldValue.serverTimestamp(),
+          'initiator': _userId,
+          'lastMessageAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } catch (e) {
+        _lastError = 'Failed to create chat doc: $e';
+        debugPrint(_lastError);
+      }
       
       notifyListeners();
     } catch (e) {
@@ -138,25 +172,39 @@ class ChatProvider extends ChangeNotifier {
 
   // Send a message to Firestore
   Future<void> sendMessage(String chatId, String text, String senderId) async {
-    final messagesRef = FirebaseFirestore.instance
-        .collection('chats')
-        .doc(chatId)
-        .collection('messages');
+    _lastError = null;
+    await _ensureAuth();
+    try {
+      final messagesRef = FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .collection('messages');
 
-    await messagesRef.add({
-      'senderId': senderId,
-      'text': text,
-      'timestamp': FieldValue.serverTimestamp(),
-    });
+      await messagesRef.add({
+        'senderId': senderId,
+        'text': text,
+        // Server timestamp for authoritative time
+        'timestamp': FieldValue.serverTimestamp(),
+        // Client-side milliseconds for immediate ordering in UI
+        'timestampMs': DateTime.now().millisecondsSinceEpoch,
+      });
+    } catch (e) {
+      _lastError = 'Send failed: $e';
+      debugPrint(_lastError);
+      rethrow;
+    } finally {
+      notifyListeners();
+    }
   }
 
   // Stream messages from Firestore
-  Stream<QuerySnapshot> getMessages(String chatId) {
+  Stream<QuerySnapshot<Map<String, dynamic>>> getMessages(String chatId) {
     return FirebaseFirestore.instance
         .collection('chats')
         .doc(chatId)
         .collection('messages')
-        .orderBy('timestamp', descending: false)
+        // Order by client timestamp to avoid null serverTimestamp gaps
+        .orderBy('timestampMs', descending: false)
         .snapshots();
   }
 

@@ -117,9 +117,35 @@ class _ChatScreenState extends State<ChatScreen> {
 
               // Messages list
               Expanded(
-                child: StreamBuilder<QuerySnapshot>(
+                child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                   stream: chatProvider.getMessages(session.id),
                   builder: (context, snapshot) {
+                    if (snapshot.hasError) {
+                      return Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24.0),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.error_outline, color: Colors.red, size: 40),
+                              const SizedBox(height: 12),
+                              Text(
+                                'Could not load messages. ${snapshot.error}',
+                                textAlign: TextAlign.center,
+                              ),
+                              if (chatProvider.lastError != null) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  chatProvider.lastError!,
+                                  style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      );
+                    }
                     if (snapshot.connectionState == ConnectionState.waiting) {
                       return const Center(child: CircularProgressIndicator());
                     }
@@ -128,13 +154,15 @@ class _ChatScreenState extends State<ChatScreen> {
                     }
 
                     final docs = snapshot.data!.docs;
+                    // After new data arrives, schedule scroll to bottom
+                    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
                     return ListView.builder(
                       controller: _scrollController,
                       padding: const EdgeInsets.all(16),
                       itemCount: docs.length,
                       itemBuilder: (context, index) {
                         final doc = docs[index];
-                        final data = doc.data() as Map<String, dynamic>;
+                        final data = doc.data();
                         final senderId = (data['senderId'] ?? '').toString();
                         final text = (data['text'] ?? '').toString();
                         final ts = data['timestamp'];
@@ -143,7 +171,10 @@ class _ChatScreenState extends State<ChatScreen> {
                           time = ts.toDate();
                         } else if (ts is DateTime) {
                           time = ts;
+                        } else if (ts is num) {
+                          time = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
                         } else {
+                          // If serverTimestamp pending null, show as now to render
                           time = DateTime.now();
                         }
 
@@ -313,7 +344,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final session = chatProvider.currentSession;
     if (session == null) return;
     final userId = await UserIdHelper.getUserId();
-    await chatProvider.sendMessage(session.id, text, userId);
+    try {
+      await chatProvider.sendMessage(session.id, text, userId);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to send: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
 
     // Scroll to bottom to show new message
     WidgetsBinding.instance.addPostFrameCallback((_) {
