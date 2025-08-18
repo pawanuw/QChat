@@ -1,20 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'screens/home_screen.dart';
+import 'providers/chat_provider_web.dart';
+import 'utils/app_theme.dart';
 
 void main() {
-  runApp(const MainApp());
+  runApp(const QChatApp());
 }
 
-class MainApp extends StatelessWidget {
-  const MainApp({super.key});
+class QChatApp extends StatelessWidget {
+  const QChatApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      debugShowCheckedModeBanner: false,
-      home: Scaffold(
-        body: Center(
-          child: Text('Hello World!'),
-        ),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => ChatProvider()),
+      ],
+      child: MaterialApp(
+        title: 'QChat',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.lightTheme,
+        home: const HomeScreen(),
       ),
     );
   }
