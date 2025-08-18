@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:provider/provider.dart';
 import '../providers/chat_provider_web.dart';
 import '../utils/app_theme.dart';
@@ -15,6 +17,35 @@ class QRScannerScreen extends StatefulWidget {
 class _QRScannerScreenState extends State<QRScannerScreen> {
   final TextEditingController _qrController = TextEditingController();
   bool isProcessing = false;
+  MobileScannerController? _scannerController;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!kIsWeb) {
+      _scannerController = MobileScannerController(
+        detectionSpeed: DetectionSpeed.noDuplicates,
+        formats: const [BarcodeFormat.qrCode],
+      );
+      _requestCameraPermission();
+    }
+  }
+
+  Future<void> _requestCameraPermission() async {
+    final status = await ph.Permission.camera.request();
+    if (status.isGranted) {
+      await _scannerController?.start();
+    } else if (status.isPermanentlyDenied) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Camera permission permanently denied. Enable it in Settings.'),
+          action: SnackBarAction(label: 'Settings', onPressed: _openAppSettings),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -104,36 +135,86 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
                 ],
               ),
             ] else ...[
-              // Mobile scanner would go here
-              Container(
-                width: double.infinity,
-                height: 300,
-                decoration: BoxDecoration(
-                  color: AppTheme.backgroundColor,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppTheme.primaryColor, width: 2),
+              // Mobile scanner implementation
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 320,
+                  child: Stack(
+                    children: [
+                      MobileScanner(
+                        controller: _scannerController,
+                        errorBuilder: (context, error, child) {
+                          String message;
+                          switch (error.errorCode) {
+                            case MobileScannerErrorCode.permissionDenied:
+                              message = 'Camera permission denied. Enable it in Settings to scan.';
+                              break;
+                            case MobileScannerErrorCode.controllerUninitialized:
+                              message = 'Scanner not initialized yet.';
+                              break;
+                            case MobileScannerErrorCode.unsupported:
+                              message = 'Camera not supported on this device.';
+                              break;
+                            default:
+                              message = 'Camera error: ${error.errorCode.name}';
+                          }
+                          return Container(
+                            color: Colors.black,
+                            alignment: Alignment.center,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.error_outline, color: Colors.white, size: 48),
+                                const SizedBox(height: 12),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                                  child: Text(message, style: const TextStyle(color: Colors.white), textAlign: TextAlign.center),
+                                ),
+                                const SizedBox(height: 12),
+                                if (message.contains('permission'))
+                                  ElevatedButton(
+                                    onPressed: _openAppSettings,
+                                    child: const Text('Open Settings'),
+                                  ),
+                              ],
+                            ),
+                          );
+                        },
+                        onDetect: (capture) async {
+                          if (isProcessing) return;
+                          final barcodes = capture.barcodes;
+                          if (barcodes.isEmpty) return;
+                          final value = barcodes.first.rawValue;
+                          if (value == null || value.isEmpty) return;
+                          await _scannerController?.stop();
+                          _qrController.text = value;
+                          await _processQRCode();
+                        },
+                      ),
+                      Positioned(
+                        top: 12,
+                        right: 12,
+                        child: Row(children: [
+                          IconButton(
+                            icon: const Icon(Icons.flash_on, color: Colors.white),
+                            onPressed: () => _scannerController?.toggleTorch(),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.cameraswitch, color: Colors.white),
+                            onPressed: () => _scannerController?.switchCamera(),
+                          ),
+                        ]),
+                      ),
+                    ],
+                  ),
                 ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(
-                      Icons.camera_alt,
-                      size: 80,
-                      color: AppTheme.primaryColor,
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      'Camera Scanner',
-                      style: Theme.of(context).textTheme.headlineMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Camera scanning available on mobile devices',
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  ],
-                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Point the camera at a QR code',
+                style: Theme.of(context).textTheme.bodyMedium,
               ),
             ],
 
@@ -261,6 +342,11 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
   @override
   void dispose() {
     _qrController.dispose();
+  _scannerController?.dispose();
     super.dispose();
+  }
+
+  void _openAppSettings() {
+    ph.openAppSettings();
   }
 }
