@@ -42,7 +42,7 @@ class _ChatScreenState extends State<ChatScreen> {
     return Consumer<ChatProvider>(
       builder: (context, chatProvider, child) {
         final session = chatProvider.currentSession;
-        
+
         if (session == null) {
           return Scaffold(
             appBar: AppBar(title: const Text('Chat')),
@@ -62,8 +62,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     _showEndChatDialog(context, chatProvider);
                   }
                 },
-                itemBuilder: (context) => [
-                  const PopupMenuItem(
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
                     value: 'end_chat',
                     child: Row(
                       children: [
@@ -79,7 +79,6 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           body: Column(
             children: [
-              // Connection status banner
               if (!chatProvider.isConnected)
                 Container(
                   width: double.infinity,
@@ -92,7 +91,6 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
 
-              // Messages list
               Expanded(
                 child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                   stream: chatProvider.getMessages(session.id),
@@ -131,85 +129,42 @@ class _ChatScreenState extends State<ChatScreen> {
                     }
 
                     final docs = snapshot.data!.docs;
-                    // After new data arrives, schedule scroll to bottom
                     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
-                    return ListView.builder(
+
+                    final sections = _groupMessagesByDate(session.id, chatProvider.userId, docs);
+
+                    return CustomScrollView(
                       controller: _scrollController,
-                      padding: const EdgeInsets.all(16),
-                      itemCount: docs.length,
-                      itemBuilder: (context, index) {
-                        final doc = docs[index];
-                        final data = doc.data();
-                        final senderId = (data['senderId'] ?? '').toString();
-                        final text = (data['text'] ?? '').toString();
-                        final ts = data['timestamp'];
-                        final tsMs = data['timestampMs'];
-                        DateTime time;
-                        if (ts is Timestamp) {
-                          time = ts.toDate();
-                        } else if (ts is DateTime) {
-                          time = ts;
-                        } else if (ts is num) {
-                          time = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
-                        } else if (tsMs is int) {
-                          time = DateTime.fromMillisecondsSinceEpoch(tsMs);
-                        } else if (tsMs is num) {
-                          time = DateTime.fromMillisecondsSinceEpoch(tsMs.toInt());
-                        } else {
-                          // If serverTimestamp pending null and no ms fallback, show as now to render
-                          time = DateTime.now();
-                        }
-
-                        final isFromMe = senderId == chatProvider.userId;
-                        final message = Message(
-                          content: text,
-                          senderId: senderId,
-                          chatSessionId: session.id,
-                          timestamp: time,
-                          isFromMe: isFromMe,
-                        );
-                        final bool showHeader;
-                        if (index == 0) {
-                          showHeader = true;
-                        } else {
-                          // Determine if this is the first message of a new day
-                          final prevData = docs[index - 1].data();
-                          final prevTs = prevData['timestamp'];
-                          final prevMs = prevData['timestampMs'];
-                          DateTime prevTime;
-                          if (prevTs is Timestamp) {
-                            prevTime = prevTs.toDate();
-                          } else if (prevTs is DateTime) {
-                            prevTime = prevTs;
-                          } else if (prevTs is num) {
-                            prevTime = DateTime.fromMillisecondsSinceEpoch(prevTs.toInt());
-                          } else if (prevMs is int) {
-                            prevTime = DateTime.fromMillisecondsSinceEpoch(prevMs);
-                          } else if (prevMs is num) {
-                            prevTime = DateTime.fromMillisecondsSinceEpoch(prevMs.toInt());
-                          } else {
-                            prevTime = time; // fallback, will result in no header
-                          }
-                          showHeader = !_isSameDay(prevTime, time);
-                        }
-
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            if (showHeader) ...[
-                              _buildDateHeader(time),
-                              const SizedBox(height: 8),
-                            ],
-                            _buildMessageBubble(message),
-                          ],
-                        );
-                      },
+                      slivers: [
+                        const SliverToBoxAdapter(child: SizedBox(height: 8)),
+                        for (final section in sections) ...[
+                          SliverPersistentHeader(
+                            pinned: true,
+                            delegate: _DateHeaderDelegate(
+                              label: _labelForDate(section.date),
+                              backgroundColor: Colors.transparent,
+                            ),
+                          ),
+                          SliverPadding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            sliver: SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (context, index) {
+                                  final message = section.messages[index];
+                                  return _buildMessageBubble(message);
+                                },
+                                childCount: section.messages.length,
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                      ],
                     );
                   },
                 ),
               ),
 
-              // Message input
               _buildMessageInput(chatProvider),
             ],
           ),
@@ -234,31 +189,55 @@ class _ChatScreenState extends State<ChatScreen> {
     return DateFormat('MM/yy').format(date);
   }
 
-  Widget _buildDateHeader(DateTime date) {
-    final label = _labelForDate(date);
-    return Center(
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: AppTheme.surfaceColor,
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 3,
-              offset: const Offset(0, 1),
-            ),
-          ],
-        ),
-        child: Text(
-          label,
-          style: const TextStyle(
-            color: AppTheme.subtitleColor,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ),
-    );
+  // Group Firestore docs into date-based sections
+  List<_MessageSection> _groupMessagesByDate(
+    String sessionId,
+    String currentUserId,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    final List<_MessageSection> sections = [];
+    for (final doc in docs) {
+      final data = doc.data();
+      final senderId = (data['senderId'] ?? '').toString();
+      final text = (data['text'] ?? '').toString();
+
+      final ts = data['timestamp'];
+      final tsMs = data['timestampMs'];
+      DateTime time;
+      if (ts is Timestamp) {
+        time = ts.toDate();
+      } else if (ts is DateTime) {
+        time = ts;
+      } else if (ts is num) {
+        time = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
+      } else if (tsMs is int) {
+        time = DateTime.fromMillisecondsSinceEpoch(tsMs);
+      } else if (tsMs is num) {
+        time = DateTime.fromMillisecondsSinceEpoch(tsMs.toInt());
+      } else {
+        time = DateTime.now();
+      }
+
+      final msg = Message(
+        content: text,
+        senderId: senderId,
+        chatSessionId: sessionId,
+        timestamp: time,
+        isFromMe: senderId == currentUserId,
+      );
+
+      if (sections.isEmpty) {
+        sections.add(_MessageSection(date: time, messages: [msg]));
+      } else {
+        final last = sections.last;
+        if (_isSameDay(last.date, time)) {
+          last.messages.add(msg);
+        } else {
+          sections.add(_MessageSection(date: time, messages: [msg]));
+        }
+      }
+    }
+    return sections;
   }
 
   Widget _buildEmptyMessagesView() {
@@ -471,5 +450,61 @@ class _ChatScreenState extends State<ChatScreen> {
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+}
+
+// Section model for grouping messages by date
+class _MessageSection {
+  final DateTime date;
+  final List<Message> messages;
+
+  _MessageSection({required this.date, required this.messages});
+}
+
+// Sliver delegate to render a pinned date label like WhatsApp
+class _DateHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final String label;
+  final Color backgroundColor;
+
+  _DateHeaderDelegate({required this.label, this.backgroundColor = Colors.transparent});
+
+  @override
+  double get minExtent => 36;
+
+  @override
+  double get maxExtent => 36;
+
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return Container(
+      color: backgroundColor,
+      alignment: Alignment.center,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: AppTheme.surfaceColor,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 3,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: AppTheme.subtitleColor,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(covariant _DateHeaderDelegate oldDelegate) {
+    return oldDelegate.label != label || oldDelegate.backgroundColor != backgroundColor;
   }
 }
