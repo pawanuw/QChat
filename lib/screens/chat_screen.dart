@@ -65,6 +65,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   final data = chatSnap.data?.data();
                   final status = (data?['permanenceStatus'] ?? session.permanenceStatus).toString();
                   final isPermanent = status == 'permanent';
+                  final requestedBy = (data?['permanentRequestedBy'] ?? '').toString();
+                  final myId = context.read<ChatProvider>().userId;
+                  final isRequestedByMe = requestedBy.isNotEmpty && requestedBy == myId;
                   return PopupMenuButton<String>(
                     onSelected: (value) async {
                       if (value == 'make_permanent') {
@@ -74,7 +77,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             const SnackBar(content: Text('Requested to make chat permanent')),
                           );
                         }
-                      } else if (value == 'respond_accept') {
+            } else if (value == 'respond_accept') {
                         await context.read<ChatProvider>().respondPermanent(session.id, accept: true);
                       } else if (value == 'respond_decline') {
                         await context.read<ChatProvider>().respondPermanent(session.id, accept: false);
@@ -107,7 +110,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         );
                       }
-                      if (status == 'pending') {
+                      if (status == 'pending' && !isRequestedByMe && requestedBy.isNotEmpty) {
                         items.addAll([
                           const PopupMenuItem(
                             value: 'respond_accept',
@@ -161,56 +164,50 @@ class _ChatScreenState extends State<ChatScreen> {
                   if (requestedAt is Timestamp) {
                     requestedAtMs = requestedAt.millisecondsSinceEpoch;
                   }
-                  final myIdFuture = UserIdHelper.getUserId();
-                  return FutureBuilder<String>(
-                    future: myIdFuture,
-                    builder: (context, idSnap) {
-                      final myId = idSnap.data ?? '';
-                      final isRequestedByMe = requestedBy == myId;
-                      if (!isRequestedByMe) {
-                        final key = '${requestedBy}_$requestedAtMs';
-                        if (_lastPermanentPromptKey != key) {
-                          _lastPermanentPromptKey = key;
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (!mounted) return;
-                            _showPermanentPromptDialog(session.id);
-                          });
-                        }
-                      }
-                      if (isRequestedByMe) {
-                        return Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          color: Colors.amber.shade100,
-                          child: const Text('Waiting for partner to accept making this chat permanent...', textAlign: TextAlign.center),
-                        );
-                      }
-                      return Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        color: Colors.blue.shade50,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Expanded(
-                              child: Text('Partner requested to make this chat permanent.', textAlign: TextAlign.center),
-                            ),
-                            const SizedBox(width: 8),
-                            TextButton.icon(
-                              onPressed: () => context.read<ChatProvider>().respondPermanent(session.id, accept: true),
-                              icon: const Icon(Icons.check, color: Colors.green),
-                              label: const Text('Accept'),
-                            ),
-                            const SizedBox(width: 4),
-                            TextButton.icon(
-                              onPressed: () => context.read<ChatProvider>().respondPermanent(session.id, accept: false),
-                              icon: const Icon(Icons.close, color: Colors.red),
-                              label: const Text('Decline'),
-                            ),
-                          ],
+                  final myId = context.read<ChatProvider>().userId;
+                  final isRequestedByMe = requestedBy.isNotEmpty && requestedBy == myId;
+                  if (!isRequestedByMe && requestedBy.isNotEmpty) {
+                    final key = '${requestedBy}_$requestedAtMs';
+                    if (_lastPermanentPromptKey != key) {
+                      _lastPermanentPromptKey = key;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted) return;
+                        _showPermanentPromptDialog(session.id);
+                      });
+                    }
+                  }
+                  if (isRequestedByMe) {
+                    return Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      color: Colors.amber.shade100,
+                      child: const Text('Waiting for partner to accept making this chat permanent...', textAlign: TextAlign.center),
+                    );
+                  }
+                  return Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    color: Colors.blue.shade50,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Expanded(
+                          child: Text('Partner requested to make this chat permanent.', textAlign: TextAlign.center),
                         ),
-                      );
-                    },
+                        const SizedBox(width: 8),
+                        TextButton.icon(
+                          onPressed: () => context.read<ChatProvider>().respondPermanent(session.id, accept: true),
+                          icon: const Icon(Icons.check, color: Colors.green),
+                          label: const Text('Accept'),
+                        ),
+                        const SizedBox(width: 4),
+                        TextButton.icon(
+                          onPressed: () => context.read<ChatProvider>().respondPermanent(session.id, accept: false),
+                          icon: const Icon(Icons.close, color: Colors.red),
+                          label: const Text('Decline'),
+                        ),
+                      ],
+                    ),
                   );
                 },
               ),

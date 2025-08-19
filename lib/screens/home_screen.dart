@@ -214,7 +214,10 @@ class HomeScreen extends StatelessWidget {
           alignment: Alignment.centerLeft,
           child: Text(session.peerName),
         ),
-        subtitle: Text(session.isPermanent ? 'Permanent' : (session.permanenceStatus == 'pending' ? 'Pending approval' : 'Temporary')),
+    // Show status only for Temporary chats; hide for Permanent and Pending
+    subtitle: session.permanenceStatus == 'temporary'
+      ? const Text('Temporary')
+      : null,
         // Remove subtitle and status dot for a cleaner list per request
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
