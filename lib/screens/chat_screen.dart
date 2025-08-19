@@ -143,6 +143,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         final senderId = (data['senderId'] ?? '').toString();
                         final text = (data['text'] ?? '').toString();
                         final ts = data['timestamp'];
+                        final tsMs = data['timestampMs'];
                         DateTime time;
                         if (ts is Timestamp) {
                           time = ts.toDate();
@@ -150,8 +151,12 @@ class _ChatScreenState extends State<ChatScreen> {
                           time = ts;
                         } else if (ts is num) {
                           time = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
+                        } else if (tsMs is int) {
+                          time = DateTime.fromMillisecondsSinceEpoch(tsMs);
+                        } else if (tsMs is num) {
+                          time = DateTime.fromMillisecondsSinceEpoch(tsMs.toInt());
                         } else {
-                          // If serverTimestamp pending null, show as now to render
+                          // If serverTimestamp pending null and no ms fallback, show as now to render
                           time = DateTime.now();
                         }
 
@@ -163,7 +168,41 @@ class _ChatScreenState extends State<ChatScreen> {
                           timestamp: time,
                           isFromMe: isFromMe,
                         );
-                        return _buildMessageBubble(message);
+                        final bool showHeader;
+                        if (index == 0) {
+                          showHeader = true;
+                        } else {
+                          // Determine if this is the first message of a new day
+                          final prevData = docs[index - 1].data();
+                          final prevTs = prevData['timestamp'];
+                          final prevMs = prevData['timestampMs'];
+                          DateTime prevTime;
+                          if (prevTs is Timestamp) {
+                            prevTime = prevTs.toDate();
+                          } else if (prevTs is DateTime) {
+                            prevTime = prevTs;
+                          } else if (prevTs is num) {
+                            prevTime = DateTime.fromMillisecondsSinceEpoch(prevTs.toInt());
+                          } else if (prevMs is int) {
+                            prevTime = DateTime.fromMillisecondsSinceEpoch(prevMs);
+                          } else if (prevMs is num) {
+                            prevTime = DateTime.fromMillisecondsSinceEpoch(prevMs.toInt());
+                          } else {
+                            prevTime = time; // fallback, will result in no header
+                          }
+                          showHeader = !_isSameDay(prevTime, time);
+                        }
+
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (showHeader) ...[
+                              _buildDateHeader(time),
+                              const SizedBox(height: 8),
+                            ],
+                            _buildMessageBubble(message),
+                          ],
+                        );
                       },
                     );
                   },
@@ -176,6 +215,49 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         );
       },
+    );
+  }
+
+  // Helpers for date headers
+  bool _isSameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  String _labelForDate(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final target = DateTime(date.year, date.month, date.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+
+    if (target == today) return 'Today';
+    if (target == yesterday) return 'Yesterday';
+    return DateFormat('MM/yy').format(date);
+  }
+
+  Widget _buildDateHeader(DateTime date) {
+    final label = _labelForDate(date);
+    return Center(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: AppTheme.surfaceColor,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 3,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: AppTheme.subtitleColor,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
     );
   }
 
