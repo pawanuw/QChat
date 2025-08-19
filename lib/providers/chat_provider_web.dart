@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../models/message.dart';
 import '../models/chat_session.dart';
@@ -43,6 +44,7 @@ class ChatProvider extends ChangeNotifier {
 
   // Track last seen timestamp per chat (milliseconds since epoch)
   final Map<String, int> _lastSeenMsPerChat = {};
+  static const _lastSeenPrefsKeyPrefix = 'lastSeenMsPerChat_';
 
   // Message listeners per chat for unread tracking
   final Map<String, StreamSubscription> _messageSubscriptions = {};
@@ -57,11 +59,37 @@ class ChatProvider extends ChangeNotifier {
     _userId = await UserIdHelper.getUserId();
     // Ensure we're authenticated for Firestore rules
     await _ensureAuth();
+    // Load persisted last-seen map for this user
+    await _loadLastSeenFromPrefs();
   await _loadChatSessions();
   _startChatsListener();
     // Consider as connected when a session is active
     _isConnected = _currentSession != null;
     notifyListeners();
+  }
+
+  Future<void> _loadLastSeenFromPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('$_lastSeenPrefsKeyPrefix$_userId');
+      if (raw != null && raw.isNotEmpty) {
+        final Map<String, dynamic> map = jsonDecode(raw) as Map<String, dynamic>;
+        _lastSeenMsPerChat
+          ..clear()
+          ..addAll(map.map((k, v) => MapEntry(k, (v is int) ? v : int.tryParse(v.toString()) ?? 0)));
+      }
+    } catch (e) {
+      debugPrint('Failed to load lastSeen prefs: $e');
+    }
+  }
+
+  Future<void> _saveLastSeenToPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('$_lastSeenPrefsKeyPrefix$_userId', jsonEncode(_lastSeenMsPerChat));
+    } catch (e) {
+      debugPrint('Failed to save lastSeen prefs: $e');
+    }
   }
 
   Future<void> _ensureAuth() async {
@@ -383,6 +411,7 @@ class ChatProvider extends ChangeNotifier {
         _lastSeenMsPerChat[chatId] = timestampMs > 0
             ? timestampMs
             : DateTime.now().millisecondsSinceEpoch;
+  _saveLastSeenToPrefs();
         return;
       }
 
@@ -391,7 +420,8 @@ class ChatProvider extends ChangeNotifier {
 
       // If currently viewing this chat, mark as seen immediately
       if (_currentSession?.id == chatId) {
-        _lastSeenMsPerChat[chatId] = DateTime.now().millisecondsSinceEpoch;
+  _lastSeenMsPerChat[chatId] = DateTime.now().millisecondsSinceEpoch;
+  _saveLastSeenToPrefs();
         return;
       }
 
@@ -422,6 +452,8 @@ class ChatProvider extends ChangeNotifier {
           m.timestamp.millisecondsSinceEpoch == message.timestamp.millisecondsSinceEpoch);
       if (!already) {
         _unreadMessages.add(message);
+  // Move the last-seen forward only when user actually views or explicitly marks read;
+  // keep as-is so multiple messages remain marked until read.
         notifyListeners();
       }
     });
@@ -435,6 +467,7 @@ class ChatProvider extends ChangeNotifier {
       _lastSeenMsPerChat[s.id] = now;
     }
     _unreadMessages.clear();
+  _saveLastSeenToPrefs();
     notifyListeners();
   }
 
@@ -442,6 +475,7 @@ class ChatProvider extends ChangeNotifier {
   void markChatAsRead(String chatId) {
     _lastSeenMsPerChat[chatId] = DateTime.now().millisecondsSinceEpoch;
     _unreadMessages.removeWhere((m) => m.chatSessionId == chatId);
+  _saveLastSeenToPrefs();
     notifyListeners();
   }
 
