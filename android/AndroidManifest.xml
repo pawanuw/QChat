@@ -3,14 +3,13 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Internet permission for real-time chat -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Notifications permission for Android 13+ -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Declare camera hardware (not required to install on devices without camera) -->
-    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- Storage permissions for local database -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     
     <application
         android:label="QChat"
-        android:name="${applicationName}"
+        android:name="com.example.q_chat.MainApplication"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
