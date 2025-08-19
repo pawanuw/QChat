@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/chat_provider_web.dart';
 import '../models/message.dart';
+import 'chat_screen.dart';
 import '../utils/app_theme.dart';
 
 class UnreadNotificationsScreen extends StatelessWidget {
@@ -88,9 +89,20 @@ class _NotificationTile extends StatelessWidget {
         title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
         subtitle: Text(message.content, maxLines: 2, overflow: TextOverflow.ellipsis),
         onTap: () async {
-          // Mark only this chat as read and navigate back
-          provider.markChatAsRead(message.chatSessionId);
-          Navigator.pop(context);
+          // Open the relevant chat and mark as read
+          try {
+            final session = provider.chatSessions.firstWhere((s) => s.id == message.chatSessionId);
+            await provider.setCurrentSession(session); // also marks chat as read
+            if (context.mounted) {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ChatScreen()),
+              );
+            }
+          } catch (_) {
+            // If session isn't found, just mark as read to clear the item
+            provider.markChatAsRead(message.chatSessionId);
+          }
         },
       ),
     );
