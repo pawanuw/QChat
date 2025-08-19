@@ -50,13 +50,13 @@ class UnreadNotificationsScreen extends StatelessWidget {
   }
 
   Widget _buildEmpty() {
-    return Center(
+    return const Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.notifications_none, size: 72, color: AppTheme.subtitleColor),
-          const SizedBox(height: 12),
-          const Text('You\'re all caught up!'),
+          Icon(Icons.notifications_none, size: 72, color: AppTheme.subtitleColor),
+          SizedBox(height: 12),
+          Text('You\'re all caught up!'),
         ],
       ),
     );
