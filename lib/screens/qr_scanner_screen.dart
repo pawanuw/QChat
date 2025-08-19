@@ -295,22 +295,12 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
       final success = await chatProvider.connectToSession(qrCode);
 
       if (success && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Connected successfully! Starting chat...'),
-            backgroundColor: AppTheme.secondaryColor,
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => const ChatScreen(),
           ),
         );
-
-        await Future.delayed(const Duration(seconds: 1));
-        if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (context) => const ChatScreen(),
-            ),
-          );
-        }
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(

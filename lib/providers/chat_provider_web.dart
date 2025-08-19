@@ -46,6 +46,7 @@ class ChatProvider extends ChangeNotifier {
 
   // Message listeners per chat for unread tracking
   final Map<String, StreamSubscription> _messageSubscriptions = {};
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _chatsSubscription;
 
   ChatProvider() {
     _init();
@@ -56,7 +57,8 @@ class ChatProvider extends ChangeNotifier {
     _userId = await UserIdHelper.getUserId();
     // Ensure we're authenticated for Firestore rules
     await _ensureAuth();
-    await _loadChatSessions();
+  await _loadChatSessions();
+  _startChatsListener();
     // Consider as connected when a session is active
     _isConnected = _currentSession != null;
     notifyListeners();
@@ -87,6 +89,56 @@ class ChatProvider extends ChangeNotifier {
     } catch (e) {
       debugPrint('Error loading chat sessions: $e');
     }
+  }
+
+  // Listen to chats collection to discover sessions involving this user
+  void _startChatsListener() {
+    _chatsSubscription?.cancel();
+    _chatsSubscription = FirebaseFirestore.instance
+        .collection('chats')
+        .where('participants', arrayContains: _userId)
+        .snapshots()
+        .listen((snapshot) {
+      final List<ChatSession> sessions = [];
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final participants = (data['participants'] as List?)?.map((e) => e.toString()).toList() ?? [];
+        if (participants.isEmpty) continue;
+        final peerId = participants.firstWhere((p) => p != _userId, orElse: () => 'peer');
+        DateTime createdAt;
+        final createdField = data['createdAt'] ?? data['lastMessageAt'];
+        if (createdField is Timestamp) {
+          createdAt = createdField.toDate();
+        } else if (createdField is DateTime) {
+          createdAt = createdField;
+        } else {
+          createdAt = DateTime.now();
+        }
+        final peerName = peerId.length >= 4
+            ? 'User ${peerId.substring(peerId.length - 4)}'
+            : 'User $peerId';
+        final session = ChatSession(
+          id: doc.id,
+          peerId: peerId,
+          peerName: peerName,
+          createdAt: createdAt,
+          isActive: true,
+        );
+        sessions.add(session);
+      }
+
+      // Merge into in-memory sessions
+      _webSessions
+        ..clear()
+        ..addAll(sessions);
+      _chatSessions = List.from(_webSessions);
+      for (final s in _chatSessions) {
+        _ensureChatListener(s.id);
+      }
+      notifyListeners();
+    }, onError: (e) {
+      debugPrint('Chats listener error: $e');
+    });
   }
 
   // Generate QR code data for pairing: share only our userId
@@ -211,6 +263,17 @@ class ChatProvider extends ChangeNotifier {
         // Client-side milliseconds for immediate ordering in UI
         'timestampMs': DateTime.now().millisecondsSinceEpoch,
       });
+
+      // Update parent chat metadata so recipient devices discover/update the chat list
+      final chatDoc = FirebaseFirestore.instance.collection('chats').doc(chatId);
+      await chatDoc.set({
+        'lastMessageAt': FieldValue.serverTimestamp(),
+        'lastMessageText': text,
+        'participants': FieldValue.arrayUnion([
+          senderId,
+          if (_currentSession?.peerId != null) _currentSession!.peerId,
+        ]),
+      }, SetOptions(merge: true));
     } catch (e) {
       _lastError = 'Send failed: $e';
       debugPrint(_lastError);
@@ -384,6 +447,7 @@ class ChatProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+  _chatsSubscription?.cancel();
     for (final sub in _messageSubscriptions.values) {
       sub.cancel();
     }

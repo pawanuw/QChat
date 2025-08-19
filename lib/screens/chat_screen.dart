@@ -54,31 +54,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
         return Scaffold(
           appBar: AppBar(
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(session.peerName),
-                Text(
-                  chatProvider.isConnected ? 'Connected' : 'Disconnected',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Colors.white70,
-                  ),
-                ),
-              ],
-            ),
+            title: Text(session.peerName),
             actions: [
-              Container(
-                width: 12,
-                height: 12,
-                margin: const EdgeInsets.only(right: 16),
-                decoration: BoxDecoration(
-                  color: chatProvider.isConnected 
-                      ? AppTheme.secondaryColor 
-                      : Colors.red,
-                  shape: BoxShape.circle,
-                ),
-              ),
               PopupMenuButton<String>(
                 onSelected: (value) async {
                   if (value == 'end_chat') {
