@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "684837269700",
+    "project_id": "qchat-chat-app",
+    "storage_bucket": "qchat-chat-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:684837269700:android:4d33b771e0bac727a81991",
+        "android_client_info": {
+          "package_name": "com.example.q_chat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDnfyajknMunHO-8Ql2P1igxu2oWJCqrk4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

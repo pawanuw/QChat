@@ -1,6 +1,6 @@
 {
-    "name": "q_chat",
-    "short_name": "q_chat",
+    "name": "QChat",
+    "short_name": "QChat",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
