@@ -4,6 +4,9 @@ class ChatSession {
   final String peerName;
   final DateTime createdAt;
   final bool isActive;
+  // Permanence status: 'temporary' | 'pending' | 'permanent'
+  final String permanenceStatus;
+  bool get isPermanent => permanenceStatus == 'permanent';
 
   ChatSession({
     required this.id,
@@ -11,6 +14,7 @@ class ChatSession {
     required this.peerName,
     required this.createdAt,
     required this.isActive,
+  this.permanenceStatus = 'temporary',
   });
 
   // Convert ChatSession to Map for database storage
@@ -21,6 +25,8 @@ class ChatSession {
       'peerName': peerName,
       'createdAt': createdAt.millisecondsSinceEpoch,
       'isActive': isActive ? 1 : 0,
+  // NOTE: We intentionally do not include permanence fields here to keep
+  // compatibility with the existing SQLite table schema on non-web builds.
     };
   }
 
@@ -32,6 +38,7 @@ class ChatSession {
       peerName: map['peerName'],
       createdAt: DateTime.fromMillisecondsSinceEpoch(map['createdAt']),
       isActive: map['isActive'] == 1,
+  permanenceStatus: (map['permanenceStatus'] ?? 'temporary') as String,
     );
   }
 
@@ -42,6 +49,7 @@ class ChatSession {
     String? peerName,
     DateTime? createdAt,
     bool? isActive,
+    String? permanenceStatus,
   }) {
     return ChatSession(
       id: id ?? this.id,
@@ -49,6 +57,7 @@ class ChatSession {
       peerName: peerName ?? this.peerName,
       createdAt: createdAt ?? this.createdAt,
       isActive: isActive ?? this.isActive,
+      permanenceStatus: permanenceStatus ?? this.permanenceStatus,
     );
   }
 }

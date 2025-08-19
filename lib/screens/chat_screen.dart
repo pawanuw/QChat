@@ -6,6 +6,7 @@ import '../providers/chat_provider_web.dart';
 import '../models/message.dart';
 import '../utils/app_theme.dart';
 import '../utils/user_id.dart';
+// cloud_firestore already imported above
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -17,6 +18,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  String? _lastPermanentPromptKey;
 
   @override
   void initState() {
@@ -56,29 +58,162 @@ class _ChatScreenState extends State<ChatScreen> {
           appBar: AppBar(
             title: Text(session.peerName),
             actions: [
-              PopupMenuButton<String>(
-                onSelected: (value) async {
-                  if (value == 'end_chat') {
-                    _showEndChatDialog(context, chatProvider);
-                  }
+              // Permanence status/action button
+              StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                stream: context.read<ChatProvider>().watchChat(session.id),
+                builder: (context, chatSnap) {
+                  final data = chatSnap.data?.data();
+                  final status = (data?['permanenceStatus'] ?? session.permanenceStatus).toString();
+                  final isPermanent = status == 'permanent';
+                  return PopupMenuButton<String>(
+                    onSelected: (value) async {
+                      if (value == 'make_permanent') {
+                        await context.read<ChatProvider>().requestPermanent(session.id);
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Requested to make chat permanent')),
+                          );
+                        }
+                      } else if (value == 'respond_accept') {
+                        await context.read<ChatProvider>().respondPermanent(session.id, accept: true);
+                      } else if (value == 'respond_decline') {
+                        await context.read<ChatProvider>().respondPermanent(session.id, accept: false);
+                      } else if (value == 'end_chat') {
+                        _showEndChatDialog(context, chatProvider);
+                      }
+                    },
+                    itemBuilder: (context) {
+                      final items = <PopupMenuEntry<String>>[];
+                      items.add(
+                        PopupMenuItem(
+                          value: 'status',
+                          enabled: false,
+                          child: Row(children: [
+                            Icon(isPermanent ? Icons.lock : Icons.timer, color: AppTheme.subtitleColor),
+                            const SizedBox(width: 8),
+                            Text(isPermanent ? 'Permanent chat' : status == 'pending' ? 'Pending approval' : 'Temporary chat'),
+                          ]),
+                        ),
+                      );
+                      if (!isPermanent && status != 'pending') {
+                        items.add(
+                          const PopupMenuItem(
+                            value: 'make_permanent',
+                            child: Row(children: [
+                              Icon(Icons.lock_open),
+                              SizedBox(width: 8),
+                              Text('Make permanent'),
+                            ]),
+                          ),
+                        );
+                      }
+                      if (status == 'pending') {
+                        items.addAll([
+                          const PopupMenuItem(
+                            value: 'respond_accept',
+                            child: Row(children: [
+                              Icon(Icons.check_circle, color: Colors.green),
+                              SizedBox(width: 8),
+                              Text('Accept permanent'),
+                            ]),
+                          ),
+                          const PopupMenuItem(
+                            value: 'respond_decline',
+                            child: Row(children: [
+                              Icon(Icons.cancel, color: Colors.red),
+                              SizedBox(width: 8),
+                              Text('Decline'),
+                            ]),
+                          ),
+                        ]);
+                      }
+                      items.add(
+                        const PopupMenuItem(
+                          value: 'end_chat',
+                          child: Row(
+                            children: [
+                              Icon(Icons.exit_to_app, color: Colors.red),
+                              SizedBox(width: 8),
+                              Text('End Chat'),
+                            ],
+                          ),
+                        ),
+                      );
+                      return items;
+                    },
+                  );
                 },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(
-                    value: 'end_chat',
-                    child: Row(
-                      children: [
-                        Icon(Icons.exit_to_app, color: Colors.red),
-                        SizedBox(width: 8),
-                        Text('End Chat'),
-                      ],
-                    ),
-                  ),
-                ],
               ),
             ],
           ),
           body: Column(
             children: [
+              // Banner for pending permanence request directed to me
+              StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                stream: context.read<ChatProvider>().watchChat(session.id),
+                builder: (context, chatSnap) {
+                  final data = chatSnap.data?.data();
+                  final status = (data?['permanenceStatus'] ?? session.permanenceStatus).toString();
+                  if (status != 'pending') return const SizedBox.shrink();
+                  final requestedBy = (data?['permanentRequestedBy'] ?? '').toString();
+                  final requestedAt = data?['permanentRequestedAt'];
+                  int requestedAtMs = 0;
+                  if (requestedAt is Timestamp) {
+                    requestedAtMs = requestedAt.millisecondsSinceEpoch;
+                  }
+                  final myIdFuture = UserIdHelper.getUserId();
+                  return FutureBuilder<String>(
+                    future: myIdFuture,
+                    builder: (context, idSnap) {
+                      final myId = idSnap.data ?? '';
+                      final isRequestedByMe = requestedBy == myId;
+                      if (!isRequestedByMe) {
+                        final key = '${requestedBy}_$requestedAtMs';
+                        if (_lastPermanentPromptKey != key) {
+                          _lastPermanentPromptKey = key;
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+                            _showPermanentPromptDialog(session.id);
+                          });
+                        }
+                      }
+                      if (isRequestedByMe) {
+                        return Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          color: Colors.amber.shade100,
+                          child: const Text('Waiting for partner to accept making this chat permanent...', textAlign: TextAlign.center),
+                        );
+                      }
+                      return Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        color: Colors.blue.shade50,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Expanded(
+                              child: Text('Partner requested to make this chat permanent.', textAlign: TextAlign.center),
+                            ),
+                            const SizedBox(width: 8),
+                            TextButton.icon(
+                              onPressed: () => context.read<ChatProvider>().respondPermanent(session.id, accept: true),
+                              icon: const Icon(Icons.check, color: Colors.green),
+                              label: const Text('Accept'),
+                            ),
+                            const SizedBox(width: 4),
+                            TextButton.icon(
+                              onPressed: () => context.read<ChatProvider>().respondPermanent(session.id, accept: false),
+                              icon: const Icon(Icons.close, color: Colors.red),
+                              label: const Text('Decline'),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
               if (!chatProvider.isConnected)
                 Container(
                   width: double.infinity,
@@ -439,6 +574,32 @@ class _ChatScreenState extends State<ChatScreen> {
             },
             style: TextButton.styleFrom(foregroundColor: Colors.red),
             child: const Text('End Chat'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showPermanentPromptDialog(String chatId) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Make chat permanent?'),
+        content: const Text('Your chat partner wants to keep this chat permanently. Do you agree?'),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await context.read<ChatProvider>().respondPermanent(chatId, accept: false);
+            },
+            child: const Text('No'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await context.read<ChatProvider>().respondPermanent(chatId, accept: true);
+            },
+            child: const Text('Yes, keep'),
           ),
         ],
       ),

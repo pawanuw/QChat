@@ -142,6 +142,7 @@ class ChatProvider extends ChangeNotifier {
         } else {
           createdAt = DateTime.now();
         }
+        final permanenceStatus = (data['permanenceStatus'] ?? 'temporary').toString();
         final peerName = peerId.length >= 4
             ? 'User ${peerId.substring(peerId.length - 4)}'
             : 'User $peerId';
@@ -151,6 +152,7 @@ class ChatProvider extends ChangeNotifier {
           peerName: peerName,
           createdAt: createdAt,
           isActive: true,
+          permanenceStatus: permanenceStatus,
         );
         sessions.add(session);
       }
@@ -160,6 +162,14 @@ class ChatProvider extends ChangeNotifier {
         ..clear()
         ..addAll(sessions);
       _chatSessions = List.from(_webSessions);
+      // Keep current session in sync with latest fields
+      if (_currentSession != null) {
+        final match = _webSessions.firstWhere(
+          (s) => s.id == _currentSession!.id,
+          orElse: () => _currentSession!,
+        );
+        _currentSession = match;
+      }
       for (final s in _chatSessions) {
         _ensureChatListener(s.id);
       }
@@ -238,6 +248,8 @@ class ChatProvider extends ChangeNotifier {
           'createdAt': FieldValue.serverTimestamp(),
           'initiator': _userId,
           'lastMessageAt': FieldValue.serverTimestamp(),
+          'permanenceStatus': 'temporary',
+          'permanentConsents': {}, // map of userId -> true when user consents
         }, SetOptions(merge: true));
       } catch (e) {
         _lastError = 'Failed to create chat doc: $e';
@@ -250,6 +262,83 @@ class ChatProvider extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       debugPrint('Error starting chat session: $e');
+    }
+  }
+
+  // Expose a stream for a chat document (to drive UI prompts)
+  Stream<DocumentSnapshot<Map<String, dynamic>>> watchChat(String chatId) {
+    return FirebaseFirestore.instance.collection('chats').doc(chatId).snapshots();
+  }
+
+  // User requests to make a chat permanent
+  Future<void> requestPermanent(String chatId) async {
+    await _ensureAuth();
+    try {
+      final ref = FirebaseFirestore.instance.collection('chats').doc(chatId);
+      await ref.set({
+        'permanenceStatus': 'pending',
+        'permanentConsents': {_userId: true},
+        'permanentRequestedAt': FieldValue.serverTimestamp(),
+        'permanentRequestedBy': _userId,
+      }, SetOptions(merge: true));
+
+      // Check if both have consented already
+      await _maybeFinalizePermanent(ref);
+    } catch (e) {
+      _lastError = 'Request permanent failed: $e';
+      debugPrint(_lastError);
+      rethrow;
+    }
+  }
+
+  // Accept or decline permanent request
+  Future<void> respondPermanent(String chatId, {required bool accept}) async {
+    await _ensureAuth();
+    final ref = FirebaseFirestore.instance.collection('chats').doc(chatId);
+    try {
+      if (accept) {
+        await ref.set({
+          'permanentConsents': {_userId: true},
+        }, SetOptions(merge: true));
+        await _maybeFinalizePermanent(ref);
+      } else {
+        // Clear pending and consents
+        await ref.set({
+          'permanenceStatus': 'temporary',
+          'permanentConsents': FieldValue.delete(),
+          'lastPermanentDeclinedBy': _userId,
+          'lastPermanentDeclinedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+    } catch (e) {
+      _lastError = 'Respond permanent failed: $e';
+      debugPrint(_lastError);
+      rethrow;
+    }
+  }
+
+  // Internal: if both participants have consented, mark chat as permanent
+  Future<void> _maybeFinalizePermanent(DocumentReference<Map<String, dynamic>> ref) async {
+    final snap = await ref.get();
+    final data = snap.data();
+    if (data == null) return;
+    final participants = (data['participants'] as List?)?.map((e) => e.toString()).toList() ?? [];
+    final consentsMap = (data['permanentConsents'] as Map?)?.map((k, v) => MapEntry(k.toString(), v)) ?? {};
+    final consented = consentsMap.keys.toSet();
+    if (participants.length >= 2) {
+      final needed = participants.toSet();
+      if (needed.difference(consented).isEmpty) {
+        await ref.set({
+          'permanenceStatus': 'permanent',
+          'isPermanent': true,
+          'permanentAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } else {
+        // keep pending
+        await ref.set({
+          'permanenceStatus': 'pending',
+        }, SetOptions(merge: true));
+      }
     }
   }
 

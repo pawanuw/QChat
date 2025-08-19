@@ -204,9 +204,9 @@ class HomeScreen extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: session.isActive ? AppTheme.secondaryColor : AppTheme.subtitleColor,
+          backgroundColor: session.isPermanent ? AppTheme.secondaryColor : AppTheme.subtitleColor,
           child: Icon(
-            session.isActive ? Icons.chat : Icons.chat_outlined,
+            session.isPermanent ? Icons.lock : Icons.timer,
             color: Colors.white,
           ),
         ),
@@ -214,6 +214,7 @@ class HomeScreen extends StatelessWidget {
           alignment: Alignment.centerLeft,
           child: Text(session.peerName),
         ),
+        subtitle: Text(session.isPermanent ? 'Permanent' : (session.permanenceStatus == 'pending' ? 'Pending approval' : 'Temporary')),
         // Remove subtitle and status dot for a cleaner list per request
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
@@ -221,7 +222,14 @@ class HomeScreen extends StatelessWidget {
             const SizedBox(width: 8),
             PopupMenuButton<String>(
               onSelected: (value) async {
-                if (value == 'delete') {
+                if (value == 'make_permanent') {
+                  await context.read<ChatProvider>().requestPermanent(session.id);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Requested to make chat permanent')),
+                    );
+                  }
+                } else if (value == 'delete') {
                   await context.read<ChatProvider>().deleteChatSession(session.id);
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -231,6 +239,17 @@ class HomeScreen extends StatelessWidget {
                 }
               },
               itemBuilder: (context) => [
+                if (!session.isPermanent && session.permanenceStatus != 'pending')
+                  const PopupMenuItem(
+                    value: 'make_permanent',
+                    child: Row(
+                      children: [
+                        Icon(Icons.lock_open),
+                        SizedBox(width: 8),
+                        Text('Make permanent'),
+                      ],
+                    ),
+                  ),
                 const PopupMenuItem(
                   value: 'delete',
                   child: Row(
