@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../models/message.dart';
 import '../models/chat_session.dart';
@@ -43,10 +44,17 @@ class ChatProvider extends ChangeNotifier {
 
   // Track last seen timestamp per chat (milliseconds since epoch)
   final Map<String, int> _lastSeenMsPerChat = {};
+  static const _lastSeenPrefsKeyPrefix = 'lastSeenMsPerChat_';
 
   // Message listeners per chat for unread tracking
   final Map<String, StreamSubscription> _messageSubscriptions = {};
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _chatsSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _tempChatsSubscription;
+  // Track which chats are temporary in this runtime
+  final Set<String> _temporaryChatIds = <String>{};
+  // Caches to merge session sources cleanly
+  final Map<String, ChatSession> _permanentSessionsById = {};
+  final Map<String, ChatSession> _temporarySessionsById = {};
 
   ChatProvider() {
     _init();
@@ -57,11 +65,38 @@ class ChatProvider extends ChangeNotifier {
     _userId = await UserIdHelper.getUserId();
     // Ensure we're authenticated for Firestore rules
     await _ensureAuth();
+    // Load persisted last-seen map for this user
+    await _loadLastSeenFromPrefs();
   await _loadChatSessions();
   _startChatsListener();
+  _startTempChatsListener();
     // Consider as connected when a session is active
     _isConnected = _currentSession != null;
     notifyListeners();
+  }
+
+  Future<void> _loadLastSeenFromPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('$_lastSeenPrefsKeyPrefix$_userId');
+      if (raw != null && raw.isNotEmpty) {
+        final Map<String, dynamic> map = jsonDecode(raw) as Map<String, dynamic>;
+        _lastSeenMsPerChat
+          ..clear()
+          ..addAll(map.map((k, v) => MapEntry(k, (v is int) ? v : int.tryParse(v.toString()) ?? 0)));
+      }
+    } catch (e) {
+      debugPrint('Failed to load lastSeen prefs: $e');
+    }
+  }
+
+  Future<void> _saveLastSeenToPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('$_lastSeenPrefsKeyPrefix$_userId', jsonEncode(_lastSeenMsPerChat));
+    } catch (e) {
+      debugPrint('Failed to save lastSeen prefs: $e');
+    }
   }
 
   Future<void> _ensureAuth() async {
@@ -99,12 +134,87 @@ class ChatProvider extends ChangeNotifier {
         .where('participants', arrayContains: _userId)
         .snapshots()
         .listen((snapshot) {
-      final List<ChatSession> sessions = [];
+  final List<ChatSession> sessions = [];
+  for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final participants = (data['participants'] as List?)?.map((e) => e.toString()).toList() ?? [];
+        if (participants.isEmpty) continue;
+        final peerId = participants.firstWhere((p) => p != _userId, orElse: () => 'peer');
+        DateTime createdAt;
+        final createdField = data['createdAt'] ?? data['lastMessageAt'];
+        if (createdField is Timestamp) {
+          createdAt = createdField.toDate();
+        } else if (createdField is DateTime) {
+          createdAt = createdField;
+        } else {
+          createdAt = DateTime.now();
+        }
+  final permanenceStatus = (data['permanenceStatus'] ?? 'temporary').toString();
+        // Only show permanent chats in home/recent list
+        if (permanenceStatus != 'permanent') {
+          continue;
+        }
+        final peerName = peerId.length >= 4
+            ? 'User ${peerId.substring(peerId.length - 4)}'
+            : 'User $peerId';
+        final session = ChatSession(
+          id: doc.id,
+          peerId: peerId,
+          peerName: peerName,
+          createdAt: createdAt,
+          isActive: true,
+          permanenceStatus: permanenceStatus,
+        );
+        sessions.add(session);
+      }
+      // Update permanent sessions cache
+      _permanentSessionsById
+        ..clear()
+        ..addEntries(sessions.map((s) => MapEntry(s.id, s)));
+      _rebuildSessionsList();
+      // Ensure routing points to permanent when a migrated chat appears here
+      for (final s in sessions) {
+        _temporaryChatIds.remove(s.id);
+      }
+      // Keep current session in sync with latest fields
+      if (_currentSession != null) {
+        final match = _webSessions.firstWhere(
+          (s) => s.id == _currentSession!.id,
+          orElse: () => _currentSession!,
+        );
+        _currentSession = match;
+      }
+      for (final s in _chatSessions) {
+        _ensureChatListener(s.id);
+      }
+      notifyListeners();
+    }, onError: (e) {
+      debugPrint('Chats listener error: $e');
+    });
+  }
+
+  // Listen to temporary chats and surface them in Home once a message exists
+  void _startTempChatsListener() {
+    _tempChatsSubscription?.cancel();
+    _tempChatsSubscription = FirebaseFirestore.instance
+        .collection('tempChats')
+        .where('participants', arrayContains: _userId)
+        .snapshots()
+        .listen((snapshot) {
+      final Map<String, ChatSession> temps = {};
+      final Set<String> presentIds = snapshot.docs.map((d) => d.id).toSet();
       for (final doc in snapshot.docs) {
         final data = doc.data();
         final participants = (data['participants'] as List?)?.map((e) => e.toString()).toList() ?? [];
         if (participants.isEmpty) continue;
         final peerId = participants.firstWhere((p) => p != _userId, orElse: () => 'peer');
+        final status = (data['permanenceStatus'] ?? 'temporary').toString();
+        // Only show temporary in list if at least one message has been sent
+        final lastMessageText = (data['lastMessageText'] ?? '').toString();
+        if (lastMessageText.isEmpty) {
+          // Skip temp chats without messages to meet UX requirement
+          continue;
+        }
         DateTime createdAt;
         final createdField = data['createdAt'] ?? data['lastMessageAt'];
         if (createdField is Timestamp) {
@@ -123,22 +233,51 @@ class ChatProvider extends ChangeNotifier {
           peerName: peerName,
           createdAt: createdAt,
           isActive: true,
+          permanenceStatus: status,
         );
-        sessions.add(session);
+        temps[session.id] = session;
+        // Mark it as temporary locally for routing (will be fully synced below)
       }
 
-      // Merge into in-memory sessions
-      _webSessions
+      // Sync routing to actual temp docs (add all present, remove missing)
+      _temporaryChatIds
+        ..removeWhere((id) => !presentIds.contains(id))
+        ..addAll(presentIds);
+
+      _temporarySessionsById
         ..clear()
-        ..addAll(sessions);
-      _chatSessions = List.from(_webSessions);
+        ..addAll(temps);
+      _rebuildSessionsList();
+      // Ensure listeners for unread tracking
       for (final s in _chatSessions) {
         _ensureChatListener(s.id);
       }
       notifyListeners();
     }, onError: (e) {
-      debugPrint('Chats listener error: $e');
+      debugPrint('Temp chats listener error: $e');
     });
+  }
+
+  void _rebuildSessionsList() {
+    // Combine permanent and eligible temporary sessions
+    final combined = <ChatSession>[
+      ..._permanentSessionsById.values,
+      ..._temporarySessionsById.values,
+    ];
+    // Sort by createdAt descending to keep recent first
+    combined.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _webSessions
+      ..clear()
+      ..addAll(combined);
+    _chatSessions = List.from(_webSessions);
+    // Keep current session up to date if visible
+    if (_currentSession != null) {
+      final match = combined.firstWhere(
+        (s) => s.id == _currentSession!.id,
+        orElse: () => _currentSession!,
+      );
+      _currentSession = match;
+    }
   }
 
   // Generate QR code data for pairing: share only our userId
@@ -202,15 +341,18 @@ class ChatProvider extends ChangeNotifier {
       _chatSessions = List.from(_webSessions);
       _isConnected = true;
 
-      // Ensure a chat document exists in Firestore so the peer can discover it
+      // Ensure a TEMP chat document exists for live messaging only
       try {
-        final chatDoc = FirebaseFirestore.instance.collection('chats').doc(sessionId);
+        final chatDoc = FirebaseFirestore.instance.collection('tempChats').doc(sessionId);
         await chatDoc.set({
           'participants': [_userId, partnerId],
           'createdAt': FieldValue.serverTimestamp(),
           'initiator': _userId,
           'lastMessageAt': FieldValue.serverTimestamp(),
+          'permanenceStatus': 'temporary',
+          'permanentConsents': {}, // map of userId -> true when user consents
         }, SetOptions(merge: true));
+        _temporaryChatIds.add(sessionId);
       } catch (e) {
         _lastError = 'Failed to create chat doc: $e';
         debugPrint(_lastError);
@@ -222,6 +364,139 @@ class ChatProvider extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       debugPrint('Error starting chat session: $e');
+    }
+  }
+
+  // Expose a stream for a chat document (to drive UI prompts)
+  Stream<DocumentSnapshot<Map<String, dynamic>>> watchChat(String chatId) {
+  final isTemp = _temporaryChatIds.contains(chatId);
+  return FirebaseFirestore.instance
+    .collection(isTemp ? 'tempChats' : 'chats')
+    .doc(chatId)
+    .snapshots();
+  }
+
+  // User requests to make a chat permanent
+  Future<void> requestPermanent(String chatId) async {
+    await _ensureAuth();
+    try {
+  final isTemp = _temporaryChatIds.contains(chatId);
+  final ref = FirebaseFirestore.instance.collection(isTemp ? 'tempChats' : 'chats').doc(chatId);
+      await ref.set({
+        'permanenceStatus': 'pending',
+        'permanentConsents': {_userId: true},
+        'permanentRequestedAt': FieldValue.serverTimestamp(),
+        'permanentRequestedBy': _userId,
+      }, SetOptions(merge: true));
+
+      // Check if both have consented already
+      await _maybeFinalizePermanent(ref);
+    } catch (e) {
+      _lastError = 'Request permanent failed: $e';
+      debugPrint(_lastError);
+      rethrow;
+    } finally {
+      notifyListeners();
+    }
+  }
+
+  // Accept or decline permanent request
+  Future<void> respondPermanent(String chatId, {required bool accept}) async {
+    await _ensureAuth();
+  final isTemp = _temporaryChatIds.contains(chatId);
+  final ref = FirebaseFirestore.instance.collection(isTemp ? 'tempChats' : 'chats').doc(chatId);
+    try {
+      if (accept) {
+        await ref.set({
+          'permanentConsents': {_userId: true},
+        }, SetOptions(merge: true));
+        await _maybeFinalizePermanent(ref);
+      } else {
+        // Clear pending and consents
+        await ref.set({
+          'permanenceStatus': 'temporary',
+          'permanentConsents': FieldValue.delete(),
+          'lastPermanentDeclinedBy': _userId,
+          'lastPermanentDeclinedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+    } catch (e) {
+      _lastError = 'Respond permanent failed: $e';
+      debugPrint(_lastError);
+      rethrow;
+    } finally {
+      notifyListeners();
+    }
+  }
+
+  // Internal: if both participants have consented, mark chat as permanent
+  Future<void> _maybeFinalizePermanent(DocumentReference<Map<String, dynamic>> ref) async {
+    final snap = await ref.get();
+    final data = snap.data();
+    if (data == null) return;
+    final participants = (data['participants'] as List?)?.map((e) => e.toString()).toList() ?? [];
+    final consentsMap = (data['permanentConsents'] as Map?)?.map((k, v) => MapEntry(k.toString(), v)) ?? {};
+    final consented = consentsMap.keys.toSet();
+    if (participants.length >= 2) {
+      final needed = participants.toSet();
+      if (needed.difference(consented).isEmpty) {
+        // If temp, migrate to chats and delete temp
+        final isTemp = ref.parent.id == 'tempChats';
+        final chatId = ref.id;
+        if (isTemp) {
+          final target = FirebaseFirestore.instance.collection('chats').doc(chatId);
+          await target.set({
+            'participants': participants,
+            'createdAt': data['createdAt'] ?? FieldValue.serverTimestamp(),
+            'initiator': data['initiator'] ?? _userId,
+            'lastMessageAt': data['lastMessageAt'] ?? FieldValue.serverTimestamp(),
+            'lastMessageText': data['lastMessageText'] ?? '',
+            'permanenceStatus': 'permanent',
+            'permanentAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+
+          // Copy messages in pages (use startAfterDocument to avoid skipping same-timestamp docs)
+          final src = ref.collection('messages');
+          final dst = target.collection('messages');
+          const page = 400;
+          QuerySnapshot<Map<String, dynamic>> q = await src.orderBy('timestampMs', descending: false).limit(page).get();
+          while (q.docs.isNotEmpty) {
+            final batch = FirebaseFirestore.instance.batch();
+            for (final d in q.docs) {
+              batch.set(dst.doc(d.id), d.data(), SetOptions(merge: true));
+            }
+            await batch.commit();
+            if (q.docs.length < page) break;
+            final lastDoc = q.docs.last;
+            q = await src.orderBy('timestampMs', descending: false).startAfterDocument(lastDoc).limit(page).get();
+          }
+
+          // Switch routing to permanent before deleting temp to prevent UI flicker/data loss
+          _temporaryChatIds.remove(chatId);
+          if (_currentSession?.id == chatId) {
+            _currentSession = _currentSession!.copyWith(permanenceStatus: 'permanent');
+          }
+          notifyListeners();
+
+          // Now delete temp chat tree (best-effort)
+          try {
+            await deleteTempChatDocument(chatId);
+          } catch (e) {
+            debugPrint('Cleanup temp chat after migration failed: $e');
+          }
+        } else {
+          await ref.set({
+            'permanenceStatus': 'permanent',
+            'isPermanent': true,
+            'permanentAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+        }
+      } else {
+        // keep pending
+        await ref.set({
+          'permanenceStatus': 'pending',
+        }, SetOptions(merge: true));
+      }
     }
   }
 
@@ -250,29 +525,23 @@ class ChatProvider extends ChangeNotifier {
     _lastError = null;
     await _ensureAuth();
     try {
+      final isTemp = _temporaryChatIds.contains(chatId);
       final messagesRef = FirebaseFirestore.instance
-          .collection('chats')
+          .collection(isTemp ? 'tempChats' : 'chats')
           .doc(chatId)
           .collection('messages');
 
       await messagesRef.add({
         'senderId': senderId,
         'text': text,
-        // Server timestamp for authoritative time
         'timestamp': FieldValue.serverTimestamp(),
-        // Client-side milliseconds for immediate ordering in UI
         'timestampMs': DateTime.now().millisecondsSinceEpoch,
       });
 
-      // Update parent chat metadata so recipient devices discover/update the chat list
-      final chatDoc = FirebaseFirestore.instance.collection('chats').doc(chatId);
+      final chatDoc = FirebaseFirestore.instance.collection(isTemp ? 'tempChats' : 'chats').doc(chatId);
       await chatDoc.set({
         'lastMessageAt': FieldValue.serverTimestamp(),
         'lastMessageText': text,
-        'participants': FieldValue.arrayUnion([
-          senderId,
-          if (_currentSession?.peerId != null) _currentSession!.peerId,
-        ]),
       }, SetOptions(merge: true));
     } catch (e) {
       _lastError = 'Send failed: $e';
@@ -285,11 +554,11 @@ class ChatProvider extends ChangeNotifier {
 
   // Stream messages from Firestore
   Stream<QuerySnapshot<Map<String, dynamic>>> getMessages(String chatId) {
+    final isTemp = _temporaryChatIds.contains(chatId);
     return FirebaseFirestore.instance
-        .collection('chats')
+        .collection(isTemp ? 'tempChats' : 'chats')
         .doc(chatId)
         .collection('messages')
-        // Order by client timestamp to avoid null serverTimestamp gaps
         .orderBy('timestampMs', descending: false)
         .snapshots();
   }
@@ -306,7 +575,24 @@ class ChatProvider extends ChangeNotifier {
 
   // End current session
   Future<void> endCurrentSession() async {
+    final session = _currentSession;
     disconnect();
+    if (session == null) return;
+    try {
+      if (_temporaryChatIds.contains(session.id)) {
+        await deleteTempChatDocument(session.id);
+        _temporaryChatIds.remove(session.id);
+      } else {
+        final ref = FirebaseFirestore.instance.collection('chats').doc(session.id);
+        final snap = await ref.get();
+        final status = (snap.data()?['permanenceStatus'] ?? 'temporary').toString();
+        if (status != 'permanent') {
+          await deleteChatDocument(session.id);
+        }
+      }
+    } catch (e) {
+      debugPrint('endCurrentSession cleanup error: $e');
+    }
   }
 
   // Get partner ID for current session
@@ -331,6 +617,10 @@ class ChatProvider extends ChangeNotifier {
   _messageSubscriptions.remove(sessionId)?.cancel();
   _lastSeenMsPerChat.remove(sessionId);
   _unreadMessages.removeWhere((m) => m.chatSessionId == sessionId);
+  // Delete for both sides by removing the chat doc (permanent or temp) and its messages
+  await deleteChatDocument(sessionId);
+  await deleteTempChatDocument(sessionId);
+  _temporaryChatIds.remove(sessionId);
       notifyListeners();
     } catch (e) {
       debugPrint('Error deleting session: $e');
@@ -352,6 +642,60 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Delete all messages in a chat and then the chat document itself
+  Future<void> deleteChatDocument(String chatId) async {
+    try {
+      final messagesRef = FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .collection('messages');
+
+      // Delete in batches to avoid exceeding limits
+      const batchSize = 300;
+      while (true) {
+        final snap = await messagesRef.limit(batchSize).get();
+        if (snap.docs.isEmpty) break;
+        final batch = FirebaseFirestore.instance.batch();
+        for (final d in snap.docs) {
+          batch.delete(d.reference);
+        }
+        await batch.commit();
+        if (snap.docs.length < batchSize) break;
+      }
+
+      // Finally, delete the chat document
+      await FirebaseFirestore.instance.collection('chats').doc(chatId).delete();
+    } catch (e) {
+      debugPrint('deleteChatDocument error: $e');
+    }
+  }
+
+  // Delete a temporary chat and its messages
+  Future<void> deleteTempChatDocument(String chatId) async {
+    try {
+      final messagesRef = FirebaseFirestore.instance
+          .collection('tempChats')
+          .doc(chatId)
+          .collection('messages');
+
+      const batchSize = 300;
+      while (true) {
+        final snap = await messagesRef.limit(batchSize).get();
+        if (snap.docs.isEmpty) break;
+        final batch = FirebaseFirestore.instance.batch();
+        for (final d in snap.docs) {
+          batch.delete(d.reference);
+        }
+        await batch.commit();
+        if (snap.docs.length < batchSize) break;
+      }
+
+      await FirebaseFirestore.instance.collection('tempChats').doc(chatId).delete();
+    } catch (e) {
+      debugPrint('deleteTempChatDocument error: $e');
+    }
+  }
+
   // Compose a deterministic chat id for two users
   String _composeChatId(String a, String b) {
     final sorted = [a, b]..sort();
@@ -361,8 +705,9 @@ class ChatProvider extends ChangeNotifier {
   // Internal: setup a listener on latest messages for unread tracking
   void _ensureChatListener(String chatId) {
     if (_messageSubscriptions.containsKey(chatId)) return;
-    final sub = FirebaseFirestore.instance
-        .collection('chats')
+  final isTemp = _temporaryChatIds.contains(chatId);
+  final sub = FirebaseFirestore.instance
+    .collection(isTemp ? 'tempChats' : 'chats')
         .doc(chatId)
         .collection('messages')
         .orderBy('timestampMs', descending: true)
@@ -383,6 +728,7 @@ class ChatProvider extends ChangeNotifier {
         _lastSeenMsPerChat[chatId] = timestampMs > 0
             ? timestampMs
             : DateTime.now().millisecondsSinceEpoch;
+  _saveLastSeenToPrefs();
         return;
       }
 
@@ -391,7 +737,8 @@ class ChatProvider extends ChangeNotifier {
 
       // If currently viewing this chat, mark as seen immediately
       if (_currentSession?.id == chatId) {
-        _lastSeenMsPerChat[chatId] = DateTime.now().millisecondsSinceEpoch;
+  _lastSeenMsPerChat[chatId] = DateTime.now().millisecondsSinceEpoch;
+  _saveLastSeenToPrefs();
         return;
       }
 
@@ -422,6 +769,8 @@ class ChatProvider extends ChangeNotifier {
           m.timestamp.millisecondsSinceEpoch == message.timestamp.millisecondsSinceEpoch);
       if (!already) {
         _unreadMessages.add(message);
+  // Move the last-seen forward only when user actually views or explicitly marks read;
+  // keep as-is so multiple messages remain marked until read.
         notifyListeners();
       }
     });
@@ -435,6 +784,7 @@ class ChatProvider extends ChangeNotifier {
       _lastSeenMsPerChat[s.id] = now;
     }
     _unreadMessages.clear();
+  _saveLastSeenToPrefs();
     notifyListeners();
   }
 
@@ -442,12 +792,14 @@ class ChatProvider extends ChangeNotifier {
   void markChatAsRead(String chatId) {
     _lastSeenMsPerChat[chatId] = DateTime.now().millisecondsSinceEpoch;
     _unreadMessages.removeWhere((m) => m.chatSessionId == chatId);
+  _saveLastSeenToPrefs();
     notifyListeners();
   }
 
   @override
   void dispose() {
   _chatsSubscription?.cancel();
+    _tempChatsSubscription?.cancel();
     for (final sub in _messageSubscriptions.values) {
       sub.cancel();
     }

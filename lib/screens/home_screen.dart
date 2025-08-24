@@ -35,34 +35,26 @@ class HomeScreen extends StatelessWidget {
                           builder: (context) => const UnreadNotificationsScreen(),
                         ),
                       );
-                      // After returning, clear unread notifications
-                      if (context.mounted) {
-                        context.read<ChatProvider>().markAllAsRead();
-                      }
+                      // Do not auto-clear on return; badge updates reactively
                     },
                   ),
                   if (unreadCount > 0)
                     Positioned(
-                      right: 10,
-                      top: 10,
+                      right: 12,
+                      top: 12,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        width: 10,
+                        height: 10,
                         decoration: BoxDecoration(
                           color: Colors.redAccent,
-                          borderRadius: BorderRadius.circular(10),
+                          shape: BoxShape.circle,
                           boxShadow: [
                             BoxShadow(
                               color: Colors.black.withOpacity(0.2),
-                              blurRadius: 4,
-                              offset: const Offset(0, 2),
+                              blurRadius: 3,
+                              offset: const Offset(0, 1),
                             ),
                           ],
-                        ),
-                        constraints: const BoxConstraints(minWidth: 18, minHeight: 16),
-                        child: Text(
-                          unreadCount > 99 ? '99+' : '$unreadCount',
-                          style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
-                          textAlign: TextAlign.center,
                         ),
                       ),
                     ),
@@ -212,9 +204,9 @@ class HomeScreen extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: session.isActive ? AppTheme.secondaryColor : AppTheme.subtitleColor,
+          backgroundColor: session.isPermanent ? AppTheme.secondaryColor : AppTheme.subtitleColor,
           child: Icon(
-            session.isActive ? Icons.chat : Icons.chat_outlined,
+            session.isPermanent ? Icons.lock : Icons.timer,
             color: Colors.white,
           ),
         ),
@@ -222,6 +214,10 @@ class HomeScreen extends StatelessWidget {
           alignment: Alignment.centerLeft,
           child: Text(session.peerName),
         ),
+    // Show status only for Temporary chats; hide for Permanent and Pending
+    subtitle: session.permanenceStatus == 'temporary'
+      ? const Text('Temporary')
+      : null,
         // Remove subtitle and status dot for a cleaner list per request
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
@@ -229,7 +225,14 @@ class HomeScreen extends StatelessWidget {
             const SizedBox(width: 8),
             PopupMenuButton<String>(
               onSelected: (value) async {
-                if (value == 'delete') {
+                if (value == 'make_permanent') {
+                  await context.read<ChatProvider>().requestPermanent(session.id);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Requested to make chat permanent')),
+                    );
+                  }
+                } else if (value == 'delete') {
                   await context.read<ChatProvider>().deleteChatSession(session.id);
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -239,6 +242,17 @@ class HomeScreen extends StatelessWidget {
                 }
               },
               itemBuilder: (context) => [
+                if (!session.isPermanent && session.permanenceStatus != 'pending')
+                  const PopupMenuItem(
+                    value: 'make_permanent',
+                    child: Row(
+                      children: [
+                        Icon(Icons.lock_open),
+                        SizedBox(width: 8),
+                        Text('Make permanent'),
+                      ],
+                    ),
+                  ),
                 const PopupMenuItem(
                   value: 'delete',
                   child: Row(

@@ -6,6 +6,7 @@ import '../providers/chat_provider_web.dart';
 import '../models/message.dart';
 import '../utils/app_theme.dart';
 import '../utils/user_id.dart';
+// cloud_firestore already imported above
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -17,6 +18,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  String? _lastPermanentPromptKey;
 
   @override
   void initState() {
@@ -42,7 +44,7 @@ class _ChatScreenState extends State<ChatScreen> {
     return Consumer<ChatProvider>(
       builder: (context, chatProvider, child) {
         final session = chatProvider.currentSession;
-        
+
         if (session == null) {
           return Scaffold(
             appBar: AppBar(title: const Text('Chat')),
@@ -56,30 +58,159 @@ class _ChatScreenState extends State<ChatScreen> {
           appBar: AppBar(
             title: Text(session.peerName),
             actions: [
-              PopupMenuButton<String>(
-                onSelected: (value) async {
-                  if (value == 'end_chat') {
-                    _showEndChatDialog(context, chatProvider);
-                  }
+              // Permanence status/action button
+              StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                stream: context.read<ChatProvider>().watchChat(session.id),
+                builder: (context, chatSnap) {
+                  final data = chatSnap.data?.data();
+                  final status = (data?['permanenceStatus'] ?? session.permanenceStatus).toString();
+                  final isPermanent = status == 'permanent';
+                  final requestedBy = (data?['permanentRequestedBy'] ?? '').toString();
+                  final myId = context.read<ChatProvider>().userId;
+                  final isRequestedByMe = requestedBy.isNotEmpty && requestedBy == myId;
+                  return PopupMenuButton<String>(
+                    onSelected: (value) async {
+                      if (value == 'make_permanent') {
+                        await context.read<ChatProvider>().requestPermanent(session.id);
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Requested to make chat permanent')),
+                          );
+                        }
+            } else if (value == 'respond_accept') {
+                        await context.read<ChatProvider>().respondPermanent(session.id, accept: true);
+                      } else if (value == 'respond_decline') {
+                        await context.read<ChatProvider>().respondPermanent(session.id, accept: false);
+                      } else if (value == 'end_chat') {
+                        _showEndChatDialog(context, chatProvider);
+                      }
+                    },
+                    itemBuilder: (context) {
+                      final items = <PopupMenuEntry<String>>[];
+                      items.add(
+                        PopupMenuItem(
+                          value: 'status',
+                          enabled: false,
+                          child: Row(children: [
+                            Icon(isPermanent ? Icons.lock : Icons.timer, color: AppTheme.subtitleColor),
+                            const SizedBox(width: 8),
+                            Text(isPermanent ? 'Permanent chat' : status == 'pending' ? 'Pending approval' : 'Temporary chat'),
+                          ]),
+                        ),
+                      );
+                      if (!isPermanent && status != 'pending') {
+                        items.add(
+                          const PopupMenuItem(
+                            value: 'make_permanent',
+                            child: Row(children: [
+                              Icon(Icons.lock_open),
+                              SizedBox(width: 8),
+                              Text('Make permanent'),
+                            ]),
+                          ),
+                        );
+                      }
+                      if (status == 'pending' && !isRequestedByMe && requestedBy.isNotEmpty) {
+                        items.addAll([
+                          const PopupMenuItem(
+                            value: 'respond_accept',
+                            child: Row(children: [
+                              Icon(Icons.check_circle, color: Colors.green),
+                              SizedBox(width: 8),
+                              Text('Accept permanent'),
+                            ]),
+                          ),
+                          const PopupMenuItem(
+                            value: 'respond_decline',
+                            child: Row(children: [
+                              Icon(Icons.cancel, color: Colors.red),
+                              SizedBox(width: 8),
+                              Text('Decline'),
+                            ]),
+                          ),
+                        ]);
+                      }
+                      items.add(
+                        const PopupMenuItem(
+                          value: 'end_chat',
+                          child: Row(
+                            children: [
+                              Icon(Icons.exit_to_app, color: Colors.red),
+                              SizedBox(width: 8),
+                              Text('End Chat'),
+                            ],
+                          ),
+                        ),
+                      );
+                      return items;
+                    },
+                  );
                 },
-                itemBuilder: (context) => [
-                  const PopupMenuItem(
-                    value: 'end_chat',
-                    child: Row(
-                      children: [
-                        Icon(Icons.exit_to_app, color: Colors.red),
-                        SizedBox(width: 8),
-                        Text('End Chat'),
-                      ],
-                    ),
-                  ),
-                ],
               ),
             ],
           ),
           body: Column(
             children: [
-              // Connection status banner
+              // Banner for pending permanence request directed to me
+              StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                stream: context.read<ChatProvider>().watchChat(session.id),
+                builder: (context, chatSnap) {
+                  final data = chatSnap.data?.data();
+                  final status = (data?['permanenceStatus'] ?? session.permanenceStatus).toString();
+                  if (status != 'pending') return const SizedBox.shrink();
+                  final requestedBy = (data?['permanentRequestedBy'] ?? '').toString();
+                  final requestedAt = data?['permanentRequestedAt'];
+                  int requestedAtMs = 0;
+                  if (requestedAt is Timestamp) {
+                    requestedAtMs = requestedAt.millisecondsSinceEpoch;
+                  }
+                  final myId = context.read<ChatProvider>().userId;
+                  final isRequestedByMe = requestedBy.isNotEmpty && requestedBy == myId;
+                  if (!isRequestedByMe && requestedBy.isNotEmpty) {
+                    final key = '${requestedBy}_$requestedAtMs';
+                    if (_lastPermanentPromptKey != key) {
+                      _lastPermanentPromptKey = key;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted) return;
+                        _showPermanentPromptDialog(session.id);
+                      });
+                    }
+                  }
+                  if (isRequestedByMe) {
+                    return Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      color: Colors.amber.shade100,
+                      child: const Text('Waiting for partner to accept making this chat permanent...', textAlign: TextAlign.center),
+                    );
+                  }
+                  return Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    color: Colors.blue.shade50,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Expanded(
+                          child: Text('Partner requested to make this chat permanent.', textAlign: TextAlign.center),
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton.icon(
+                          onPressed: () => context.read<ChatProvider>().respondPermanent(session.id, accept: true),
+                          icon: const Icon(Icons.check, color: Colors.green),
+                          label: const Text('Accept'),
+                        ),
+                        const SizedBox(width: 4),
+                        TextButton.icon(
+                          onPressed: () => context.read<ChatProvider>().respondPermanent(session.id, accept: false),
+                          icon: const Icon(Icons.close, color: Colors.red),
+                          label: const Text('Decline'),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
               if (!chatProvider.isConnected)
                 Container(
                   width: double.infinity,
@@ -92,7 +223,6 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
 
-              // Messages list
               Expanded(
                 child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                   stream: chatProvider.getMessages(session.id),
@@ -131,52 +261,115 @@ class _ChatScreenState extends State<ChatScreen> {
                     }
 
                     final docs = snapshot.data!.docs;
-                    // After new data arrives, schedule scroll to bottom
                     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
-                    return ListView.builder(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.all(16),
-                      itemCount: docs.length,
-                      itemBuilder: (context, index) {
-                        final doc = docs[index];
-                        final data = doc.data();
-                        final senderId = (data['senderId'] ?? '').toString();
-                        final text = (data['text'] ?? '').toString();
-                        final ts = data['timestamp'];
-                        DateTime time;
-                        if (ts is Timestamp) {
-                          time = ts.toDate();
-                        } else if (ts is DateTime) {
-                          time = ts;
-                        } else if (ts is num) {
-                          time = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
-                        } else {
-                          // If serverTimestamp pending null, show as now to render
-                          time = DateTime.now();
-                        }
 
-                        final isFromMe = senderId == chatProvider.userId;
-                        final message = Message(
-                          content: text,
-                          senderId: senderId,
-                          chatSessionId: session.id,
-                          timestamp: time,
-                          isFromMe: isFromMe,
-                        );
-                        return _buildMessageBubble(message);
-                      },
+                    final sections = _groupMessagesByDate(session.id, chatProvider.userId, docs);
+
+                    return CustomScrollView(
+                      controller: _scrollController,
+                      slivers: [
+                        const SliverToBoxAdapter(child: SizedBox(height: 8)),
+                        for (final section in sections) ...[
+                          SliverPersistentHeader(
+                            pinned: true,
+                            delegate: _DateHeaderDelegate(
+                              label: _labelForDate(section.date),
+                              backgroundColor: Colors.transparent,
+                            ),
+                          ),
+                          SliverPadding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            sliver: SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (context, index) {
+                                  final message = section.messages[index];
+                                  return _buildMessageBubble(message);
+                                },
+                                childCount: section.messages.length,
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                      ],
                     );
                   },
                 ),
               ),
 
-              // Message input
               _buildMessageInput(chatProvider),
             ],
           ),
         );
       },
     );
+  }
+
+  // Helpers for date headers
+  bool _isSameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  String _labelForDate(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final target = DateTime(date.year, date.month, date.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+
+    if (target == today) return 'Today';
+    if (target == yesterday) return 'Yesterday';
+    return DateFormat('MM/yy').format(date);
+  }
+
+  // Group Firestore docs into date-based sections
+  List<_MessageSection> _groupMessagesByDate(
+    String sessionId,
+    String currentUserId,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    final List<_MessageSection> sections = [];
+    for (final doc in docs) {
+      final data = doc.data();
+      final senderId = (data['senderId'] ?? '').toString();
+      final text = (data['text'] ?? '').toString();
+
+      final ts = data['timestamp'];
+      final tsMs = data['timestampMs'];
+      DateTime time;
+      if (ts is Timestamp) {
+        time = ts.toDate();
+      } else if (ts is DateTime) {
+        time = ts;
+      } else if (ts is num) {
+        time = DateTime.fromMillisecondsSinceEpoch(ts.toInt());
+      } else if (tsMs is int) {
+        time = DateTime.fromMillisecondsSinceEpoch(tsMs);
+      } else if (tsMs is num) {
+        time = DateTime.fromMillisecondsSinceEpoch(tsMs.toInt());
+      } else {
+        time = DateTime.now();
+      }
+
+      final msg = Message(
+        content: text,
+        senderId: senderId,
+        chatSessionId: sessionId,
+        timestamp: time,
+        isFromMe: senderId == currentUserId,
+      );
+
+      if (sections.isEmpty) {
+        sections.add(_MessageSection(date: time, messages: [msg]));
+      } else {
+        final last = sections.last;
+        if (_isSameDay(last.date, time)) {
+          last.messages.add(msg);
+        } else {
+          sections.add(_MessageSection(date: time, messages: [msg]));
+        }
+      }
+    }
+    return sections;
   }
 
   Widget _buildEmptyMessagesView() {
@@ -384,10 +577,92 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  void _showPermanentPromptDialog(String chatId) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Make chat permanent?'),
+        content: const Text('Your chat partner wants to keep this chat permanently. Do you agree?'),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await context.read<ChatProvider>().respondPermanent(chatId, accept: false);
+            },
+            child: const Text('No'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await context.read<ChatProvider>().respondPermanent(chatId, accept: true);
+            },
+            child: const Text('Yes, keep'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+}
+
+// Section model for grouping messages by date
+class _MessageSection {
+  final DateTime date;
+  final List<Message> messages;
+
+  _MessageSection({required this.date, required this.messages});
+}
+
+// Sliver delegate to render a pinned date label like WhatsApp
+class _DateHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final String label;
+  final Color backgroundColor;
+
+  _DateHeaderDelegate({required this.label, this.backgroundColor = Colors.transparent});
+
+  @override
+  double get minExtent => 36;
+
+  @override
+  double get maxExtent => 36;
+
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return Container(
+      color: backgroundColor,
+      alignment: Alignment.center,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: AppTheme.surfaceColor,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 3,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: AppTheme.subtitleColor,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(covariant _DateHeaderDelegate oldDelegate) {
+    return oldDelegate.label != label || oldDelegate.backgroundColor != backgroundColor;
   }
 }

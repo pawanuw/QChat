@@ -24,7 +24,7 @@ class _QRGeneratorScreenState extends State<QRGeneratorScreen> {
   void _generateQRCode() {
     final chatProvider = context.read<ChatProvider>();
     setState(() {
-      qrData = chatProvider.generateQRData();
+  qrData = chatProvider.generateQRData();
       isWaitingForConnection = true;
     });
   }
